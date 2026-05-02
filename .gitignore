@@ -141,3 +141,6 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# imperfect controls
+models/clip-vit-large-patch14
