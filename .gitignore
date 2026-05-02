@@ -144,3 +144,5 @@ dmypy.json
 
 # imperfect controls
 models/clip-vit-large-patch14
+*.out
+*.err
