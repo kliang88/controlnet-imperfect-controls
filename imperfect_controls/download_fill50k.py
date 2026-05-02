@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Download and extract Fill50K into `training/fill50k`."""
 
-import argparse
 import sys
 import zipfile
 from pathlib import Path
@@ -13,16 +12,7 @@ ZIP_IN_REPO = "training/fill50k.zip"
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Download Fill50K.")
-    parser.add_argument(
-        "--root",
-        type=Path,
-        default=Path(__file__).resolve().parent,
-        help="Base directory fo the dataset (this script's directory by default).",
-    )
-    args = parser.parse_args()
-
-    root = args.root.resolve()
+    root = Path(__file__).resolve().parent
     training_dir = root / "training"
     expected = training_dir / "fill50k" / "prompt.json"
     if expected.is_file():
