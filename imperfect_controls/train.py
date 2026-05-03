@@ -78,6 +78,8 @@ _checkpoint_base = _SCRIPT_DIR / "checkpoints"
 checkpoint_dir = str(_checkpoint_base / _RUN_SUBDIR) if _RUN_SUBDIR else str(_checkpoint_base)
 batch_size = 4
 logger_freq = 300
+# Save a checkpoint every N optimizer steps.
+checkpoint_every_n_train_steps = 500
 learning_rate = 1e-5
 sd_locked = True
 only_mid_control = False
@@ -104,25 +106,54 @@ model.only_mid_control = only_mid_control
 
 
 # Misc
-dataset = Fill50KDataset()
-dataloader = DataLoader(dataset, num_workers=0, batch_size=batch_size, shuffle=True)
+train_dataset = Fill50KDataset(
+    split="train",
+    train_ratio=0.8,
+    val_ratio=0.1,
+    test_ratio=0.1,
+    seed=42,
+)
+val_dataset = Fill50KDataset(
+    split="val",
+    train_ratio=0.8,
+    val_ratio=0.1,
+    test_ratio=0.1,
+    seed=42,
+)
+test_dataset = Fill50KDataset(
+    split="test",
+    train_ratio=0.8,
+    val_ratio=0.1,
+    test_ratio=0.1,
+    seed=42,
+)
+train_loader = DataLoader(train_dataset, num_workers=0, batch_size=batch_size, shuffle=True)
+val_loader = DataLoader(val_dataset, num_workers=0, batch_size=batch_size, shuffle=False)
+test_loader = DataLoader(test_dataset, num_workers=0, batch_size=batch_size, shuffle=False)
+print(f"Split sizes: train={len(train_dataset)}, val={len(val_dataset)}, test={len(test_dataset)}")
 logger = ImageLogger(batch_frequency=logger_freq)
-# keep the 3 lowest train/loss checkpoints and the latest checkpoint
+# keep the 3 lowest val/loss checkpoints and the latest checkpoint
 checkpoint_cb = ModelCheckpoint(
     dirpath=checkpoint_dir,
-    filename="fill50k-{epoch:03d}",
+    filename="fill50k-step={step:06d}",
     save_last=True, # also save the latest checkpoint
     save_weights_only=True,
     save_top_k=3,
-    monitor="train/loss",
+    monitor="val/loss",
     mode="min",
-    every_n_epochs=1,
+    every_n_train_steps=checkpoint_every_n_train_steps,
 )
-_trainer_kw = dict(gpus=1, precision=32, callbacks=[logger, checkpoint_cb])
+_trainer_kw = dict(
+    gpus=1,
+    precision=32,
+    callbacks=[logger, checkpoint_cb],
+    val_check_interval=checkpoint_every_n_train_steps,
+)
 if max_steps >= 0:
     _trainer_kw["max_steps"] = max_steps
 trainer = pl.Trainer(**_trainer_kw)
 
 
 # Train
-trainer.fit(model, dataloader)
+trainer.fit(model, train_loader, val_loader)
+# trainer.test(model, dataloaders=test_loader, ckpt_path="best") # no meaningful test step yet, inherited from Lightning's test() method
