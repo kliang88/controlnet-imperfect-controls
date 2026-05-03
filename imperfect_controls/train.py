@@ -127,9 +127,9 @@ test_dataset = Fill50KDataset(
     test_ratio=0.1,
     seed=42,
 )
-train_loader = DataLoader(train_dataset, num_workers=0, batch_size=batch_size, shuffle=True)
-val_loader = DataLoader(val_dataset, num_workers=0, batch_size=batch_size, shuffle=False)
-test_loader = DataLoader(test_dataset, num_workers=0, batch_size=batch_size, shuffle=False)
+train_loader = DataLoader(train_dataset, num_workers=4, batch_size=batch_size, shuffle=True)
+val_loader = DataLoader(val_dataset, num_workers=4, batch_size=batch_size, shuffle=False)
+test_loader = DataLoader(test_dataset, num_workers=4, batch_size=batch_size, shuffle=False)
 print(f"Split sizes: train={len(train_dataset)}, val={len(val_dataset)}, test={len(test_dataset)}")
 logger = ImageLogger(batch_frequency=logger_freq)
 # keep the 3 lowest val/loss checkpoints and the latest checkpoint
@@ -144,7 +144,7 @@ checkpoint_cb = ModelCheckpoint(
     every_n_train_steps=checkpoint_every_n_train_steps,
 )
 _trainer_kw = dict(
-    gpus=1,
+    gpus=2,
     precision=32,
     callbacks=[logger, checkpoint_cb],
     val_check_interval=checkpoint_every_n_train_steps,

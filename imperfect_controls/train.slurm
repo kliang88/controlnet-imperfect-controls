@@ -1,8 +1,8 @@
 #!/bin/bash
 
 #SBATCH -p mit_normal_gpu
-#SBATCH -c 2
-#SBATCH -G 1
+#SBATCH -c 6
+#SBATCH -G 2
 #SBATCH --mem=64G
 #SBATCH -t 06:00:00
 #SBATCH -J train_fill50k
@@ -33,5 +33,5 @@ python imperfect_controls/train.py \
   --max-steps 8000 \
   --batch-size 4 \
   --learning-rate 1e-5 \
-  --run-name testrun2
+  --run-name testrun3
 echo "[$(date)] Train job complete."
