@@ -11,6 +11,8 @@
 
 set -euo pipefail
 
+module load miniforge/25.11.0-0
+
 if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
   if [[ -f "${SLURM_SUBMIT_DIR}/tool_add_control.py" ]]; then
     cd "${SLURM_SUBMIT_DIR}"
