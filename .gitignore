@@ -146,3 +146,4 @@ dmypy.json
 models/clip-vit-large-patch14
 *.out
 *.err
+log_outputs/

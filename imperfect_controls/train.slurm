@@ -33,5 +33,5 @@ python imperfect_controls/train.py \
   --max-steps 8000 \
   --batch-size 4 \
   --learning-rate 1e-5 \
-  --run-name testrun
+  --run-name testrun2
 echo "[$(date)] Train job complete."
