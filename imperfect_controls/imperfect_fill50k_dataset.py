@@ -183,19 +183,31 @@ def apply_hint_edge_speckle_noise(
     # "Displace white pixels" style corruption.
     move_prob: float = 0.55,
     max_displacement_px: int = 18,
-    erase_moved_prob: float = 0.9,
+    # Radial displacement: shift mostly along inward/outward normal to the stroke,
+    # with a per-pixel random mixture so some arcs skew toward the circle interior
+    # and others toward the outer side of the noise band.
+    inward_bias_prob: float = 0.35,
+    outward_bias_prob: float = 0.35,
+    # Small tangential jitter (fraction of max_displacement_px) to break uniformity.
+    tangential_jitter_frac: float = 0.35,
+    # Fraction of detected stroke pixels to erase before scattering speckles.
+    # (Previously this only dimmed moved-from pixels; that can leave a bright
+    # continuous stroke. Default=1 removes the "center line" entirely.)
+    erase_moved_prob: float = 1.0,
     # Optional small local noise to further soften the boundary.
     sigma_edge: float = 0.06,
     white_floor: float = 0.72,
 ) -> np.ndarray:
     """Corrupt a band around the stroke so the edge is poorly defined.
 
-    Displaces bright stroke pixels within an edge band by up to a max distance,
-    creating a poorly-defined boundary with displaced white/gray speckles.
+    Displaces bright stroke pixels within an edge band, biased along the radial
+    direction through the stroke centroid (inward vs outward varies per pixel),
+    so the "center" of the speckle cloud shifts along the circle.
     """
-    out = np.clip(hint, 0.0, 1.0).astype(np.float32, copy=True)
+    base = np.clip(hint, 0.0, 1.0).astype(np.float32, copy=True)
+    out = base.copy()
     h, w = out.shape[:2]
-    edge = _hint_stroke_mask(out)
+    edge = _hint_stroke_mask(base)
     if not np.any(edge):
         return out
 
@@ -208,7 +220,7 @@ def apply_hint_edge_speckle_noise(
     if not np.any(band):
         band = dil
 
-    gray = out.mean(axis=2).astype(np.float32)
+    gray = base.mean(axis=2).astype(np.float32)
     # "White-ish" pixels on/near the stroke within the edge band.
     whiteish = (gray >= float(white_floor)) & band
     ys, xs = np.where(whiteish)
@@ -224,25 +236,67 @@ def apply_hint_edge_speckle_noise(
     if len(xs) == 0:
         return out
 
-    r = int(max(1, max_displacement_px))
-    dy = rng.integers(-r, r + 1, size=len(xs))
-    dx = rng.integers(-r, r + 1, size=len(xs))
-    y2 = np.clip(ys + dy, 0, h - 1)
-    x2 = np.clip(xs + dx, 0, w - 1)
+    r_max = float(max(1, max_displacement_px))
+    # Centroid of stroke mask approximates circle center for radial directions.
+    m = cv2.moments(edge_u8, binaryImage=True)
+    if m["m00"] <= 1e-6:
+        cx, cy = (w - 1) * 0.5, (h - 1) * 0.5
+    else:
+        cx = float(m["m10"] / m["m00"])
+        cy = float(m["m01"] / m["m00"])
 
-    src = out[ys, xs]  # Nx3
+    fx = xs.astype(np.float32) - cx
+    fy = ys.astype(np.float32) - cy
+    norm = np.sqrt(fx * fx + fy * fy) + 1e-6
+    ux = fx / norm
+    uy = fy / norm
+    # Perpendicular (tangent) unit vectors for small along-edge jitter.
+    tx = -uy
+    ty = ux
+
+    n = len(xs)
+    u = rng.random(n).astype(np.float32)
+    p_in = float(inward_bias_prob)
+    p_out = float(outward_bias_prob)
+    # Remainder: symmetric radial offset (can land on either side).
+    sign = np.empty(n, dtype=np.float32)
+    sign[u < p_in] = -1.0
+    sign[(u >= p_in) & (u < p_in + p_out)] = 1.0
+    mask_sym = u >= (p_in + p_out)
+    n_sym = int(np.count_nonzero(mask_sym))
+    if n_sym > 0:
+        sign[mask_sym] = rng.choice(np.array([-1.0, 1.0], dtype=np.float32), size=n_sym)
+
+    # Distance along radial direction: mixture of small vs large moves.
+    dist01 = rng.beta(0.65, 1.25, size=n).astype(np.float32)
+    dist = dist01 * r_max
+    # Occasionally push closer to max displacement for chunkier breaks.
+    big = rng.random(n).astype(np.float32) < 0.12
+    n_big = int(np.count_nonzero(big))
+    if n_big > 0:
+        dist[big] = (0.55 + 0.45 * rng.random(n_big).astype(np.float32)) * r_max
+
+    jmag = float(tangential_jitter_frac) * r_max * rng.random(n).astype(np.float32)
+    dx = sign * dist * ux + jmag * tx
+    dy = sign * dist * uy + jmag * ty
+    x2 = np.clip(np.rint(xs.astype(np.float32) + dx).astype(np.int32), 0, w - 1)
+    y2 = np.clip(np.rint(ys.astype(np.float32) + dy).astype(np.int32), 0, h - 1)
+
+    # Remove most/all of the original continuous stroke so we don't keep a bright
+    # "center line". (Displaced speckles are painted after this, so they can still
+    # land on-mask.)
+    eys, exs = np.where(edge)
+    if len(exs) > 0 and erase_moved_prob > 0:
+        clear = rng.random(len(exs)).astype(np.float32) < float(erase_moved_prob)
+        if np.any(clear):
+            out[eys[clear], exs[clear]] = 0.0
+
+    src = base[ys, xs]  # Nx3
     # Jitter intensity slightly so it becomes white/gray speckles.
     gain = rng.uniform(0.65, 1.15, size=(len(xs), 1)).astype(np.float32)
     src = np.clip(src * gain, 0.0, 1.0)
     # Scatter onto destination using max to preserve bright speckles.
     out[y2, x2] = np.maximum(out[y2, x2], src)
-
-    # Optionally erase (most of) the moved-from pixels to make the edge broken.
-    if erase_moved_prob > 0:
-        erase = rng.random(len(xs)).astype(np.float32) < float(erase_moved_prob)
-        out[ys[erase], xs[erase]] *= rng.uniform(0.0, 0.35, size=(int(np.count_nonzero(erase)), 1)).astype(
-            np.float32
-        )
 
     # Small Gaussian noise inside band to further soften boundary.
     if sigma_edge > 0:
@@ -259,6 +313,10 @@ def apply_hint_gaussian_blur(
     k_choices: Tuple[int, ...] = (31, 41, 51, 61, 71, 81),
     # Thicken the stroke before blurring so the halo is visible.
     dilate_iter_choices: Tuple[int, ...] = (2, 3, 4, 5, 6),
+    # Dilating a thin stroke then Gaussian-blurring produces a bright ridge along
+    # the stroke skeleton. Subtracting a fraction of the original thin stroke
+    # before the big blur removes that sharp "center line" while keeping the halo.
+    core_suppress: float = 0.92,
     # Shape the halo so it's mostly gray (not a fat white band).
     halo_strength: float = 0.9,
     halo_gamma: float = 2.2,
@@ -282,6 +340,10 @@ def apply_hint_gaussian_blur(
             borderType=cv2.BORDER_CONSTANT,
             borderValue=0,
         )
+
+    if core_suppress > 0:
+        halo_src = halo_src - float(core_suppress) * base_g
+        halo_src = np.clip(halo_src, 0.0, 1.0)
 
     # Big blur => wide gradient into black.
     # Using sigma proportional to k makes the transition very soft.
