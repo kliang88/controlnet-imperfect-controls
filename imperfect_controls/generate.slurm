@@ -31,6 +31,7 @@ conda activate control
 echo "[$(date)] Starting generate job ${SLURM_JOB_ID} in $(pwd)"
 python imperfect_controls/generate.py \
   --checkpoint imperfect_controls/checkpoints/clean/fill50k-step=step=007999.ckpt \
+  --num-samples 10 \
   --corrupt-fraction 1 \
-  --corruption-type edge_segment_remove
+  --corruption-type noise_edge_speckle
 echo "[$(date)] Generate job complete."

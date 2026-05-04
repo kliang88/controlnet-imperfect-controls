@@ -4,8 +4,10 @@ Runs inference with a checkpoint and scores each sample:
 
     IoU = |foreground_true ∩ foreground_pred| / |foreground_true ∪ foreground_pred|
 
-Foreground masks are built from RGB (corner background estimate), optionally reduced to the
-largest connected component per image.
+When both foreground masks are empty, IoU is defined as 1.0 (vacuous agreement).
+
+Foreground masks use Lab distance from an estimated border background (margin threshold with
+Otsu fallback), optionally reduced to the largest connected component per image.
 
 Examples:
 
@@ -140,8 +142,12 @@ def main() -> None:
     parser.add_argument(
         "--mask-margin",
         type=float,
-        default=8.0,
-        help="Foreground/background separation margin (RGB L2); tune if masks look wrong.",
+        default=18.0,
+        help=(
+            "Pixels farther than this Lab L2 distance from the estimated border background are "
+            "foreground; if that yields an empty mask, Otsu on normalized distance is used. "
+            "Use 0 for Otsu-only (no fixed Lab threshold)."
+        ),
     )
     parser.add_argument(
         "--no-keep-largest",
@@ -289,11 +295,17 @@ def main() -> None:
         roundness_abs_delta = abs(pred_roundness - true_roundness)
         true_radius = mask_radius(true_mask)
         pred_radius = mask_radius(pred_mask)
-        radius_error = abs(pred_radius - true_radius) / true_radius if true_radius > 0.0 else 0.0
+        radius_error = (
+            abs(pred_radius - true_radius) / true_radius
+            if true_radius > 0.0
+            else float("nan")
+        )
         true_cx, true_cy = mask_center(true_mask)
         pred_cx, pred_cy = mask_center(pred_mask)
         center_dist = np.sqrt((pred_cx - true_cx) ** 2 + (pred_cy - true_cy) ** 2)
-        center_error = float(center_dist / true_radius) if true_radius > 0.0 else 0.0
+        center_error = (
+            float(center_dist / true_radius) if true_radius > 0.0 else float("nan")
+        )
         circle_color_error, background_color_error, total_color_error = color_errors_from_true_mask(
             target_rgb, pred_rgb, true_mask
         )

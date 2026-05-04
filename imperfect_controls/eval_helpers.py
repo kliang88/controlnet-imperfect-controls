@@ -14,32 +14,8 @@ from PIL import Image
 from cldm.model import create_model, load_state_dict
 
 
-def _corner_background_color(rgb: np.ndarray, border_px: int) -> np.ndarray:
-    h, w = rgb.shape[:2]
-    k = max(2, min(border_px, h // 4, w // 4))
-    patches = (
-        rgb[:k, :k],
-        rgb[:k, -k:],
-        rgb[-k:, :k],
-        rgb[-k:, -k:],
-    )
-    corners = np.concatenate([p.reshape(-1, 3) for p in patches], axis=0).astype(np.float32)
-    return np.median(corners, axis=0)
-
-
-def rgb_to_fill_mask(
-    rgb: np.ndarray,
-    *,
-    border_px: int = 12,
-    margin: float = 8.0,
-    min_area_frac: float = 0.001,
-    max_area_frac: float = 0.95,
-    morph_kernel_size: int = 5,
-) -> np.ndarray:
-    """Robust binary mask for a filled object versus background.
-
-    Designed for cases where the object may touch the image border.
-    """
+def rgb_to_uint8(rgb: np.ndarray) -> np.ndarray:
+    """Convert RGB image to uint8 RGB."""
     if rgb is None:
         raise TypeError("rgb must be a numpy array")
 
@@ -49,73 +25,187 @@ def rgb_to_fill_mask(
     if rgb.ndim != 3 or rgb.shape[2] != 3:
         raise ValueError(f"Expected RGB image HxWx3, got shape {rgb.shape}")
 
-    h, w = rgb.shape[:2]
-    if h < 4 or w < 4:
-        raise ValueError(f"Image is too small for mask extraction: {rgb.shape}")
-
-    if not (0.0 <= min_area_frac <= 1.0):
-        raise ValueError("min_area_frac must be between 0 and 1")
-    if not (0.0 <= max_area_frac <= 1.0):
-        raise ValueError("max_area_frac must be between 0 and 1")
-    if min_area_frac > max_area_frac:
-        raise ValueError("min_area_frac must be <= max_area_frac")
-
     if rgb.dtype == np.uint8:
-        rgb_for_lab = rgb
-    else:
-        rgb_for_lab = rgb.astype(np.float32)
-        finite = np.isfinite(rgb_for_lab)
-        if not np.all(finite):
-            raise ValueError("rgb contains NaN or infinite values")
-        if rgb_for_lab.max() > 1.5:
-            rgb_for_lab = rgb_for_lab / 255.0
-        rgb_for_lab = np.clip(rgb_for_lab, 0.0, 1.0)
+        return rgb
 
-    lab = cv2.cvtColor(rgb_for_lab, cv2.COLOR_RGB2LAB).astype(np.float32)
+    rgb_f = rgb.astype(np.float32)
 
+    if not np.all(np.isfinite(rgb_f)):
+        raise ValueError("rgb contains NaN or infinite values")
+
+    # Support either [0, 1], [-1, 1], or [0, 255].
+    if rgb_f.min() >= -1.01 and rgb_f.max() <= 1.01:
+        if rgb_f.min() < 0:
+            rgb_f = (rgb_f + 1.0) * 127.5
+        else:
+            rgb_f = rgb_f * 255.0
+
+    return np.clip(rgb_f, 0, 255).astype(np.uint8)
+
+
+def estimate_background_from_border(
+    rgb_u8: np.ndarray,
+    *,
+    border_px: int = 12,
+    quant_bin: int = 8,
+) -> np.ndarray:
+    """
+    Estimate background as the dominant quantized RGB color on the border.
+    This works even if the circle touches part of the border.
+    """
+    h, w = rgb_u8.shape[:2]
     k = max(1, min(int(border_px), h // 4, w // 4))
+
     border_mask = np.zeros((h, w), dtype=bool)
     border_mask[:k, :] = True
     border_mask[-k:, :] = True
     border_mask[:, :k] = True
     border_mask[:, -k:] = True
 
-    border_pixels = lab[border_mask]
-    rough_bg_lab = np.median(border_pixels, axis=0)
-    border_dist_to_rough_bg = np.linalg.norm(border_pixels - rough_bg_lab, axis=1)
-    trim_cutoff = np.percentile(border_dist_to_rough_bg, 70.0)
-    trimmed_border_pixels = border_pixels[border_dist_to_rough_bg <= trim_cutoff]
+    border_rgb = rgb_u8[border_mask]
 
-    if len(trimmed_border_pixels) >= max(16, border_pixels.shape[0] // 20):
-        bg_lab = np.median(trimmed_border_pixels, axis=0)
+    q = border_rgb // quant_bin
+    bins, counts = np.unique(q.reshape(-1, 3), axis=0, return_counts=True)
+    dominant_bin = bins[int(np.argmax(counts))]
+
+    selected = np.all(q == dominant_bin, axis=1)
+
+    if np.any(selected):
+        bg_rgb = np.median(border_rgb[selected], axis=0)
     else:
-        bg_lab = rough_bg_lab
+        bg_rgb = np.median(border_rgb, axis=0)
+
+    return np.clip(bg_rgb, 0, 255).astype(np.uint8)
+
+
+def rgb_to_fill_mask(
+    rgb: np.ndarray,
+    *,
+    border_px: int = 12,
+    margin: float = 8.0,
+    min_area_frac: float = 0.001,
+    max_area_frac: float = 0.995,
+    morph_kernel_size: int = 5,
+    debug: bool = False,
+) -> np.ndarray:
+    """
+    Extract foreground mask from a Fill50K-style filled-circle image.
+
+    Important properties:
+    - object may touch image border
+    - no border-touching component removal
+    - dominant border color is treated as background
+    - empty-mask failures fall back to positive background-distance pixels
+
+    margin:
+        Foreground pixels satisfy Lab-distance ``diff > margin`` (same units as
+        ``diff = ||Lab(px) - Lab(bg)||``). When ``margin <= 0``, skip this step and
+        use only Otsu on normalized distance.
+
+    Returns a uint8 mask with values 0 and 255.
+    """
+    rgb_u8 = rgb_to_uint8(rgb)
+
+    h, w = rgb_u8.shape[:2]
+
+    if h < 4 or w < 4:
+        raise ValueError(f"Image is too small for mask extraction: {rgb_u8.shape}")
+
+    if not (0.0 <= min_area_frac <= 1.0):
+        raise ValueError("min_area_frac must be between 0 and 1")
+
+    if not (0.0 <= max_area_frac <= 1.0):
+        raise ValueError("max_area_frac must be between 0 and 1")
+
+    if min_area_frac > max_area_frac:
+        raise ValueError("min_area_frac must be <= max_area_frac")
+
+    bg_rgb = estimate_background_from_border(
+        rgb_u8,
+        border_px=border_px,
+        quant_bin=8,
+    )
+
+    lab = cv2.cvtColor(rgb_u8, cv2.COLOR_RGB2LAB).astype(np.float32)
+    bg_lab = cv2.cvtColor(
+        bg_rgb.reshape(1, 1, 3),
+        cv2.COLOR_RGB2LAB,
+    ).reshape(3).astype(np.float32)
 
     diff = np.linalg.norm(lab - bg_lab, axis=-1)
-    border_diff = diff[border_mask]
-    thr_border = float(np.percentile(border_diff, 99.0) + margin)
 
     diff_max = float(diff.max())
-    if diff_max <= 1e-6:
-        return np.zeros((h, w), dtype=np.uint8)
+    if debug:
+        print("bg_rgb:", bg_rgb.tolist())
+        print("diff_min:", float(diff.min()))
+        print("diff_max:", diff_max)
+        print("unique_rgb_count:", len(np.unique(rgb_u8.reshape(-1, 3), axis=0)))
 
-    diff_u8 = np.clip(diff / diff_max * 255.0, 0, 255).astype(np.uint8)
-    thr_otsu_u8, _ = cv2.threshold(
-        diff_u8,
-        0,
-        255,
-        cv2.THRESH_BINARY + cv2.THRESH_OTSU,
-    )
-    thr_otsu = float(thr_otsu_u8) / 255.0 * diff_max
-    border_floor = float(np.percentile(border_diff, 95.0))
-    thr = max(min(thr_border, thr_otsu), border_floor)
+    mask = np.zeros((h, w), dtype=np.uint8)
+    if margin > 0:
+        mask = (diff > margin).astype(np.uint8) * 255
 
-    mask = (diff > thr).astype(np.uint8) * 255
-    mask = filter_components_by_area(
+    if not np.any(mask) and diff_max > 1e-6:
+        diff_u8 = np.clip(diff / diff_max * 255.0, 0, 255).astype(np.uint8)
+        otsu_thr, mask = cv2.threshold(
+            diff_u8,
+            0,
+            255,
+            cv2.THRESH_BINARY + cv2.THRESH_OTSU,
+        )
+        if debug:
+            print("otsu_fallback; otsu_thr:", float(otsu_thr))
+
+    if debug:
+        print("raw_mask_pixels:", int(np.count_nonzero(mask)))
+
+    # Fallback: empty mask — use any pixel measurably separated from bg estimate.
+    if not np.any(mask):
+        positive = diff > 1e-6
+        mask = positive.astype(np.uint8) * 255
+
+        if debug:
+            print("fallback_positive_pixels:", int(np.count_nonzero(mask)))
+
+    # Near-full mask: invert only if masked region is less separated from bg than unmasked
+    # (avoids flipping legitimate circles that cover almost the entire frame).
+    selected_frac = np.count_nonzero(mask) / float(h * w)
+    if selected_frac > 0.995:
+        fg = mask > 0
+        bg = ~fg
+        if np.any(fg) and np.any(bg):
+            mean_fg = float(diff[fg].mean())
+            mean_bg = float(diff[bg].mean())
+            if mean_fg < mean_bg:
+                inv = cv2.bitwise_not(mask)
+                if np.any(inv):
+                    mask = inv
+
+                if debug:
+                    print(
+                        "inverted_large_mask (mean_fg < mean_bg); selected_frac:",
+                        selected_frac,
+                        "mean_fg:",
+                        mean_fg,
+                        "mean_bg:",
+                        mean_bg,
+                    )
+
+    # Area filtering, but fail-soft.
+    area_filtered = filter_components_by_area(
         mask,
         min_area_frac=min_area_frac,
         max_area_frac=max_area_frac,
     )
+
+    # Do not allow area filtering to erase the mask completely.
+    if np.any(area_filtered):
+        mask = area_filtered
+    else:
+        mask = largest_component(mask)
+
+        if debug:
+            print("area filter erased mask; using largest raw component")
 
     if morph_kernel_size > 1:
         if morph_kernel_size % 2 == 0:
@@ -128,17 +218,22 @@ def rgb_to_fill_mask(
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
 
     mask = fill_mask_holes(mask)
-    mask = filter_components_by_area(
-        mask,
-        min_area_frac=min_area_frac,
-        max_area_frac=max_area_frac,
-    )
-    mask = largest_component(mask)
+    # Final largest component, but again do not let it erase anything unexpectedly.
+    final = largest_component(mask)
+    if np.any(final):
+        mask = final
+
+    if debug:
+        print("final_mask_pixels:", int(np.count_nonzero(mask)))
+
     return mask
 
 
 def pixel_mask_iou(mask_true: np.ndarray, mask_pred: np.ndarray) -> float:
-    """Pixel IoU between two binary masks (same height × width)."""
+    """Pixel IoU between two binary masks (same height × width).
+
+    When both masks are empty, returns 1.0 (vacuous agreement on background).
+    """
     if mask_true.shape[:2] != mask_pred.shape[:2]:
         raise ValueError(
             f"Mask shape mismatch: true {mask_true.shape[:2]} vs pred {mask_pred.shape[:2]}"
@@ -150,7 +245,7 @@ def pixel_mask_iou(mask_true: np.ndarray, mask_pred: np.ndarray) -> float:
     union = np.logical_or(true, pred).sum()
 
     if union == 0:
-        return 0.0
+        return 1.0
 
     return float(inter / union)
 
@@ -158,11 +253,17 @@ def pixel_mask_iou(mask_true: np.ndarray, mask_pred: np.ndarray) -> float:
 def largest_component(mask: np.ndarray) -> np.ndarray:
     """Keep only the largest connected foreground component."""
     binary = (mask > 0).astype(np.uint8)
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        binary,
+        connectivity=8,
+    )
+
     if num_labels <= 1:
         return np.zeros_like(mask, dtype=np.uint8)
+
     largest_label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-    return (labels == largest_label).astype(np.uint8) * 255
+    return ((labels == largest_label).astype(np.uint8) * 255)
 
 
 def filter_components_by_area(
@@ -174,8 +275,14 @@ def filter_components_by_area(
     """Keep connected components whose area fraction is within bounds."""
     h, w = mask.shape[:2]
     total_area = h * w
+
     binary = (mask > 0).astype(np.uint8)
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        binary,
+        connectivity=8,
+    )
+
     cleaned = np.zeros_like(mask, dtype=np.uint8)
 
     for label in range(1, num_labels):
@@ -188,22 +295,42 @@ def filter_components_by_area(
 
 
 def fill_mask_holes(mask: np.ndarray) -> np.ndarray:
-    """Fill holes in a binary uint8 mask."""
+    """
+    Fill holes in a binary mask.
+
+    Safe when foreground touches the image border because the image is padded
+    before flood filling the exterior background.
+    """
     mask = (mask > 0).astype(np.uint8) * 255
-    h, w = mask.shape[:2]
+
     if not np.any(mask):
         return mask
 
-    flood = mask.copy()
-    floodfill_mask = np.zeros((h + 2, w + 2), dtype=np.uint8)
-    for seed in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]:
-        x, y = seed
-        if flood[y, x] == 0:
-            cv2.floodFill(flood, floodfill_mask, seed, 255)
+    h, w = mask.shape[:2]
 
+    padded = cv2.copyMakeBorder(
+        mask,
+        1,
+        1,
+        1,
+        1,
+        borderType=cv2.BORDER_CONSTANT,
+        value=0,
+    )
+
+    flood = padded.copy()
+    flood_mask = np.zeros((h + 4, w + 4), dtype=np.uint8)
+
+    # Fill exterior background from the artificial padded corner.
+    cv2.floodFill(flood, flood_mask, (0, 0), 255)
+
+    # Pixels still equal to 0 after flood fill are enclosed holes.
     holes = cv2.bitwise_not(flood)
-    filled = cv2.bitwise_or(mask, holes)
-    return filled
+
+    # Add holes back to the original foreground.
+    filled_padded = cv2.bitwise_or(padded, holes)
+
+    return filled_padded[1:-1, 1:-1]
 
 
 def mask_roundness(mask: np.ndarray) -> float:
@@ -324,6 +451,16 @@ def iter_saved_samples(score_dir: Path) -> Iterator[Tuple[int, Path, Path]]:
             yield dataset_i, tp, gp
 
 
+def _nan_mean_median_std(arr: np.ndarray) -> tuple[float | None, float | None, float | None]:
+    if arr.size == 0 or not np.any(np.isfinite(arr)):
+        return None, None, None
+    return (
+        float(np.nanmean(arr)),
+        float(np.nanmedian(arr)),
+        float(np.nanstd(arr, ddof=0)),
+    )
+
+
 def summarize_metrics(
     ious: List[float],
     roundness_deltas: List[float],
@@ -373,6 +510,8 @@ def summarize_metrics(
     total_col_arr = (
         np.asarray(total_color_errors, dtype=np.float64) if total_color_errors else np.asarray([], dtype=np.float64)
     )
+    r_mean, r_med, r_std = _nan_mean_median_std(rad_arr)
+    c_mean, c_med, c_std = _nan_mean_median_std(ctr_arr)
     return {
         "count": len(ious),
         "mask_iou_mean": float(arr.mean()),
@@ -381,12 +520,12 @@ def summarize_metrics(
         "roundness_abs_delta_mean": float(r_arr.mean()) if r_arr.size > 0 else None,
         "roundness_abs_delta_median": float(np.median(r_arr)) if r_arr.size > 0 else None,
         "roundness_abs_delta_std": float(r_arr.std(ddof=0)) if r_arr.size > 0 else None,
-        "radius_error_mean": float(rad_arr.mean()) if rad_arr.size > 0 else None,
-        "radius_error_median": float(np.median(rad_arr)) if rad_arr.size > 0 else None,
-        "radius_error_std": float(rad_arr.std(ddof=0)) if rad_arr.size > 0 else None,
-        "center_error_mean": float(ctr_arr.mean()) if ctr_arr.size > 0 else None,
-        "center_error_median": float(np.median(ctr_arr)) if ctr_arr.size > 0 else None,
-        "center_error_std": float(ctr_arr.std(ddof=0)) if ctr_arr.size > 0 else None,
+        "radius_error_mean": r_mean,
+        "radius_error_median": r_med,
+        "radius_error_std": r_std,
+        "center_error_mean": c_mean,
+        "center_error_median": c_med,
+        "center_error_std": c_std,
         "circle_color_error_mean": float(circ_col_arr.mean()) if circ_col_arr.size > 0 else None,
         "circle_color_error_median": float(np.median(circ_col_arr)) if circ_col_arr.size > 0 else None,
         "circle_color_error_std": float(circ_col_arr.std(ddof=0)) if circ_col_arr.size > 0 else None,
