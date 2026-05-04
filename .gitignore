@@ -147,3 +147,5 @@ models/clip-vit-large-patch14
 *.out
 *.err
 log_outputs/
+imperfect_controls/generated/
+imperfect_controls/eval_results/

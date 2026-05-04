@@ -5,9 +5,9 @@
 #SBATCH -G 1
 #SBATCH --mem=32G
 #SBATCH -t 01:00:00
-#SBATCH -J generate_fill50k
-#SBATCH -o generate_fill50k_%j.out
-#SBATCH -e generate_fill50k_%j.err
+#SBATCH -J eval_fill50k
+#SBATCH -o eval_fill50k_%j.out
+#SBATCH -e eval_fill50k_%j.err
 
 set -euo pipefail
 
@@ -28,9 +28,9 @@ fi
 eval "$(conda shell.bash hook)"
 conda activate control
 
-echo "[$(date)] Starting generate job ${SLURM_JOB_ID} in $(pwd)"
-python imperfect_controls/generate.py \
+echo "[$(date)] Starting evaluate job ${SLURM_JOB_ID} in $(pwd)"
+python imperfect_controls/evaluate.py \
   --checkpoint imperfect_controls/checkpoints/clean/fill50k-step=step=007999.ckpt \
-  --corrupt-fraction 1 \
-  --corruption-type edge_segment_remove
-echo "[$(date)] Generate job complete."
+  --output-json imperfect_controls/eval_results/clean.json \
+  --max-samples 5
+echo "[$(date)] Evaluate job complete."
