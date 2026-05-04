@@ -143,12 +143,33 @@ def apply_hint_gaussian_blur(
     hint: np.ndarray,
     rng: np.random.Generator,
     *,
-    k_choices: Tuple[int, ...] = (3, 5, 7, 9),
+    # Larger kernels create a wide, soft falloff (matching "very blurred edge").
+    k_choices: Tuple[int, ...] = (31, 41, 51, 61, 71, 81),
+    # Thicken the stroke before blurring so the halo is visible.
+    dilate_iter_choices: Tuple[int, ...] = (2, 3, 4, 5, 6),
+    # Shape the halo so it's mostly gray (not a fat white band).
+    halo_strength: float = 0.9,
+    halo_gamma: float = 2.2,
 ) -> np.ndarray:
     k = int(rng.choice(k_choices))
-    u8 = np.clip(hint * 255.0, 0.0, 255.0).astype(np.uint8)
-    blurred = cv2.GaussianBlur(u8, (k, k), 0)
-    return blurred.astype(np.float32) / 255.0
+    base = np.clip(hint, 0.0, 1.0).astype(np.float32, copy=True)
+
+    # Halo source (thickened).
+    halo_src = base
+    dilate_iters = int(rng.choice(dilate_iter_choices))
+    if dilate_iters > 0:
+        dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        halo_src = cv2.dilate(halo_src, dilate_kernel, iterations=dilate_iters)
+
+    # Big blur => wide gradient into black.
+    # Using sigma proportional to k makes the transition very soft.
+    sigma = float(k) / 3.5
+    halo = cv2.GaussianBlur(halo_src, (k, k), sigmaX=sigma, sigmaY=sigma)
+    halo = np.clip(halo, 0.0, 1.0)
+    halo = np.power(halo, float(halo_gamma)) * float(halo_strength)
+
+    out = halo
+    return np.clip(out, 0.0, 1.0)
 
 
 CORRUPTION_FUNCS: Dict[str, CorruptionFn] = {
