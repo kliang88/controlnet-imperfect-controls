@@ -20,6 +20,9 @@ Examples:
       --output-summary-csv imperfect_controls/eval_results/run_summary.csv
 
   python imperfect_controls/evaluate.py --checkpoint path/to.ckpt --corrupt-fraction 0.5
+
+  # Folders: test_idx_*/target.png & generated.png (e.g. from a separate qualitative run)
+  python imperfect_controls/evaluate.py --score-dir imperfect_controls/generated/clean
 """
 
 # TODO: need for circle with cropping / cut off at edges or corners
@@ -191,6 +194,14 @@ def main() -> None:
         default="edge_segment_remove",
         help="Corruption name when --corrupt-fraction is set.",
     )
+    parser.add_argument(
+        "--only-corrupted",
+        action="store_true",
+        help=(
+            "With --corrupt-fraction, only evaluate test indices with corrupted hints "
+            "(same disjoint mask as training); summary reflects corrupted-only performance."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -201,6 +212,9 @@ def main() -> None:
 
     if args.corrupt_fraction is not None and not 0.0 <= args.corrupt_fraction <= 1.0:
         parser.error("--corrupt-fraction must be in [0, 1].")
+
+    if args.only_corrupted and args.corrupt_fraction is None:
+        parser.error("--only-corrupted requires --corrupt-fraction.")
 
     seed_everything(args.seed)
 
@@ -249,11 +263,18 @@ def main() -> None:
     if len(test_ds) == 0:
         raise RuntimeError("Test split is empty.")
 
-    n = len(test_ds)
-    if args.max_samples is not None:
-        n = min(n, args.max_samples)
+    if args.only_corrupted:
+        eligible = [i for i in range(len(test_ds)) if test_ds.is_corrupted_index(i)]
+    else:
+        eligible = list(range(len(test_ds)))
 
-    for i in tqdm(range(n), desc="eval"):
+    if args.max_samples is not None:
+        eligible = eligible[: args.max_samples]
+
+    if not eligible:
+        raise RuntimeError("No samples to evaluate (empty eligible index list).")
+
+    for i in tqdm(eligible, desc="eval"):
         item = test_ds[i]
         dataset_i = int(test_ds.indices[i])
         prompt = item["txt"]
@@ -342,6 +363,8 @@ def main() -> None:
     if args.corrupt_fraction is not None:
         summary["corrupt_fraction"] = args.corrupt_fraction
         summary["corruption_type"] = args.corruption_type
+        summary["only_corrupted"] = bool(args.only_corrupted)
+        summary["eval_sample_count"] = len(eligible)
     summary["ddim_steps"] = args.ddim_steps
     summary["guidance_scale"] = args.guidance_scale
     summary["strength"] = args.strength

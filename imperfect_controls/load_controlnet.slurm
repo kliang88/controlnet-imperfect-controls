@@ -1,10 +1,11 @@
 #!/bin/bash
 
+#SBATCH -A mit_general
 #SBATCH -p mit_normal_gpu
 #SBATCH -c 2
 #SBATCH -G 1
 #SBATCH --mem=64G
-#SBATCH -t 01:00:00
+#SBATCH -t 06:00:00
 #SBATCH -J load_controlnet
 #SBATCH -o load_controlnet_%j.out
 #SBATCH -e load_controlnet_%j.err

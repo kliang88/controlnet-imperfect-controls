@@ -84,8 +84,19 @@ def main():
         default="edge_segment_remove",
         help="Corruption name when --corrupt-fraction is set.",
     )
+    parser.add_argument(
+        "--only-corrupted",
+        action="store_true",
+        help=(
+            "With --corrupt-fraction, only use test indices whose hints are corrupted "
+            "(same disjoint split as training). Ignores clean test samples for this run."
+        ),
+    )
 
     args = parser.parse_args()
+
+    if args.only_corrupted and args.corrupt_fraction is None:
+        raise ValueError("--only-corrupted requires --corrupt-fraction (imperfect dataset).")
 
     if args.num_samples < 1:
         raise ValueError("--num-samples must be >= 1")
@@ -125,11 +136,20 @@ def main():
     if len(test_ds) == 0:
         raise RuntimeError("Test split is empty (check Fill50k prompt.json and split ratios).")
 
-    n = min(args.num_samples, len(test_ds))
-    if args.num_samples > len(test_ds):
+    if args.only_corrupted:
+        eligible = [i for i in range(len(test_ds)) if test_ds.is_corrupted_index(i)]
+    else:
+        eligible = list(range(len(test_ds)))
+
+    if not eligible:
+        raise RuntimeError("No samples to generate (empty eligible index list).")
+
+    n = min(args.num_samples, len(eligible))
+    if args.num_samples > len(eligible):
         print(
-            f"Note: --num-samples={args.num_samples} exceeds test split size {len(test_ds)}; using {n}."
+            f"Note: --num-samples={args.num_samples} exceeds eligible count {len(eligible)}; using {n}."
         )
+    selected = eligible[:n]
 
     # Output directory
     if args.output_dir:
@@ -139,6 +159,8 @@ def main():
         if args.corrupt_fraction is not None:
             cf_tag = str(args.corrupt_fraction).replace(".", "p")
             run_name = f"{run_name}_imperfect_{cf_tag}_{args.corruption_type}"[:120]
+            if args.only_corrupted:
+                run_name = f"{run_name}_corrupted_only"[:120]
         out_dir = (_SCRIPT_DIR / "generated" / run_name).resolve()
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -160,7 +182,7 @@ def main():
     with open(prompts_file, "w", encoding="utf-8") as f:
         f.write("local_i\tdataset_i\tsample_dir\thint_corrupt\tprompt\n")
 
-        for i in range(n):
+        for i in selected:
             item = test_ds[i]
             dataset_i = test_ds.indices[i]
             sample_dir = out_dir / f"test_idx_{dataset_i:05d}"

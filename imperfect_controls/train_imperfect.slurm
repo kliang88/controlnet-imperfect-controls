@@ -1,5 +1,6 @@
 #!/bin/bash
-# Train ControlNet on Fill50K with 50% disjoint corrupted controls (edge_segment_remove).
+# Train ControlNet on Fill50K with disjoint corrupted controls (edge_segment_remove).
+# Checkpoints: imperfect_controls/checkpoints/imperfect50_edge_drop/
 
 #SBATCH -p mit_normal_gpu
 #SBATCH -c 6
