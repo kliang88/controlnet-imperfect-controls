@@ -5,11 +5,11 @@
 #SBATCH -p mit_normal_gpu
 #SBATCH -c 6
 #SBATCH -G 2
-#SBATCH --mem=64G
+#SBATCH --mem=96G
 #SBATCH -t 06:00:00
-#SBATCH -J train_imperfect50
-#SBATCH -o train_imperfect50_%j.out
-#SBATCH -e train_imperfect50_%j.err
+#SBATCH -J train_imperfect
+#SBATCH -o train_imperfect_%j.out
+#SBATCH -e train_imperfect_%j.err
 
 set -euo pipefail
 
@@ -34,8 +34,9 @@ echo "[$(date)] Starting imperfect-controls train job ${SLURM_JOB_ID} in $(pwd)"
 python imperfect_controls/train.py \
   --corrupt-fraction 0.2 \
   --corruption-type blur \
-  --max-steps 2000 \
-  --batch-size 16 \
+  --max-steps 500 \
+  --batch-size 4 \
+  --effective-batch-size 16 \
   --learning-rate 5e-6 \
   --num-gpus 2 \
   --run-name blur_finetune \

@@ -40,7 +40,20 @@ _parser.add_argument(
     type=int,
     default=None,
     metavar="N",
-    help="Batch size before per-GPU split: each rank uses this / GPU count (default 4).",
+    help=(
+        "Per-GPU DataLoader batch size (default 4). "
+        "Gradient accumulation is chosen so global batch matches --effective-batch-size."
+    ),
+)
+_parser.add_argument(
+    "--effective-batch-size",
+    type=int,
+    default=None,
+    metavar="N",
+    help=(
+        "Global samples per optimizer step (default 16). Must be divisible by "
+        "(--batch-size * --num-gpus); sets Trainer accumulate_grad_batches."
+    ),
 )
 _parser.add_argument(
     "--learning-rate",
@@ -161,9 +174,10 @@ def main():
     checkpoint_dir = str(_checkpoint_base / _RUN_SUBDIR) if _RUN_SUBDIR else str(_checkpoint_base)
     Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
     print("Checkpoints directory: {}".format(checkpoint_dir))
-    batch_size = 4
+    effective_batch_size = 16
+    batch_size = 4  # per-GPU micro-batch; accumulation targets effective_batch_size
     logger_freq = 300
-    # Save a checkpoint every N optimizer steps.
+    # Save a checkpoint every N optimizer steps, not micro-batches.
     checkpoint_every_n_train_steps = 500
     learning_rate = 1e-5
     sd_locked = True
@@ -176,6 +190,10 @@ def main():
         if _cli.batch_size < 1:
             sys.exit("--batch-size must be >= 1")
         batch_size = _cli.batch_size
+    if _cli.effective_batch_size is not None:
+        if _cli.effective_batch_size < 1:
+            sys.exit("--effective-batch-size must be >= 1")
+        effective_batch_size = _cli.effective_batch_size
     if _cli.learning_rate is not None:
         if _cli.learning_rate <= 0:
             sys.exit("--learning-rate must be > 0")
@@ -191,7 +209,25 @@ def main():
                 )
             )
 
-    batch_size = max(1, batch_size // num_gpus)
+    micro_per_optimizer_step = batch_size * num_gpus
+    if effective_batch_size % micro_per_optimizer_step != 0:
+        sys.exit(
+            "Effective batch size {} requires (--batch-size * --num-gpus) to divide it; got {} * {} = {}.".format(
+                effective_batch_size,
+                batch_size,
+                num_gpus,
+                micro_per_optimizer_step,
+            )
+        )
+    accumulate_grad_batches = effective_batch_size // micro_per_optimizer_step
+    print(
+        "Batch: per_gpu={} gpus={} accumulate_grad_batches={} -> effective global batch {}".format(
+            batch_size,
+            num_gpus,
+            accumulate_grad_batches,
+            effective_batch_size,
+        )
+    )
 
     # First use cpu to load models. Pytorch Lightning will automatically move it to GPUs.
     model = create_model(str(_REPO_ROOT / "models/cldm_v15.yaml")).cpu()
@@ -272,6 +308,7 @@ def main():
         precision=32,
         callbacks=[logger, weights_every_n_cb, best_and_last_cb],
         val_check_interval=checkpoint_every_n_train_steps,
+        accumulate_grad_batches=accumulate_grad_batches,
     )
     if num_gpus > 1:
         _trainer_kw["strategy"] = "ddp"
