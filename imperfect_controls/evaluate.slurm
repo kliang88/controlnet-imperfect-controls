@@ -31,6 +31,8 @@ conda activate control
 echo "[$(date)] Starting evaluate job ${SLURM_JOB_ID} in $(pwd)"
 python imperfect_controls/evaluate.py \
   --checkpoint imperfect_controls/checkpoints/clean/fill50k-step=step=007999.ckpt \
-  --output-json imperfect_controls/eval_results/clean.json \
-  --max-samples 5
+  --output-csv imperfect_controls/eval_results/clean.csv \
+  --output-summary-csv imperfect_controls/eval_results/clean_summary.csv \
+  --max-samples 5 \
+  --debug-mask-dir imperfect_controls/debug_masks/clean
 echo "[$(date)] Evaluate job complete."
