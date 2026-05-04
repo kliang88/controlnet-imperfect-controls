@@ -87,6 +87,25 @@ _parser.add_argument(
     help="Number of GPUs (default 2). Use 1 for single-GPU smoke tests.",
 )
 _parser.add_argument(
+    "--val-every-n-steps",
+    type=int,
+    default=None,
+    metavar="N",
+    help=(
+        "Run validation every N optimizer (global) steps (default 500)."
+    ),
+)
+_parser.add_argument(
+    "--weights-save-every-n-steps",
+    type=int,
+    default=None,
+    metavar="N",
+    help=(
+        "Save weights-only checkpoints every N optimizer/global steps via ModelCheckpoint "
+        "every_n_train_steps (default 500)."
+    ),
+)
+_parser.add_argument(
     "--finetune-from",
     type=str,
     default=None,
@@ -177,8 +196,8 @@ def main():
     effective_batch_size = 16
     batch_size = 4  # per-GPU micro-batch; accumulation targets effective_batch_size
     logger_freq = 300
-    # Save a checkpoint every N optimizer steps, not micro-batches.
-    checkpoint_every_n_train_steps = 500
+    val_every_n_steps = 500
+    weights_save_every_n_steps = 500
     learning_rate = 1e-5
     sd_locked = True
     only_mid_control = False
@@ -198,6 +217,14 @@ def main():
         if _cli.learning_rate <= 0:
             sys.exit("--learning-rate must be > 0")
         learning_rate = _cli.learning_rate
+    if _cli.val_every_n_steps is not None:
+        if _cli.val_every_n_steps < 1:
+            sys.exit("--val-every-n-steps must be >= 1")
+        val_every_n_steps = _cli.val_every_n_steps
+    if _cli.weights_save_every_n_steps is not None:
+        if _cli.weights_save_every_n_steps < 1:
+            sys.exit("--weights-save-every-n-steps must be >= 1")
+        weights_save_every_n_steps = _cli.weights_save_every_n_steps
 
     if _cli.corrupt_fraction is not None:
         if not 0.0 <= _cli.corrupt_fraction <= 1.0:
@@ -220,12 +247,21 @@ def main():
             )
         )
     accumulate_grad_batches = effective_batch_size // micro_per_optimizer_step
+    val_check_interval_batches = val_every_n_steps * accumulate_grad_batches
     print(
         "Batch: per_gpu={} gpus={} accumulate_grad_batches={} -> effective global batch {}".format(
             batch_size,
             num_gpus,
             accumulate_grad_batches,
             effective_batch_size,
+        )
+    )
+    print(
+        "Validation every {} optimizer steps -> val_check_interval={} training batches; "
+        "weights-only checkpoint every_n_train_steps={}".format(
+            val_every_n_steps,
+            val_check_interval_batches,
+            weights_save_every_n_steps,
         )
     )
 
@@ -289,7 +325,7 @@ def main():
     weights_every_n_cb = ModelCheckpoint(
         dirpath=checkpoint_dir,
         filename="weights-{}={{step:06d}}".format(_ckpt_tag),
-        every_n_train_steps=checkpoint_every_n_train_steps,
+        every_n_train_steps=weights_save_every_n_steps,
         save_weights_only=True,
         save_last=False,
         save_top_k=-1,
@@ -307,7 +343,7 @@ def main():
         gpus=num_gpus,
         precision=32,
         callbacks=[logger, weights_every_n_cb, best_and_last_cb],
-        val_check_interval=checkpoint_every_n_train_steps,
+        val_check_interval=val_check_interval_batches,
         accumulate_grad_batches=accumulate_grad_batches,
     )
     if num_gpus > 1:

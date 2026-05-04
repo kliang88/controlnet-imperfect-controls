@@ -30,6 +30,30 @@ fi
 eval "$(conda shell.bash hook)"
 conda activate control
 
+echo "Waiting for 2 CUDA devices to become visible..."
+for i in {1..60}; do
+  visible_count=$(python - <<'PY'
+import torch
+print(torch.cuda.device_count())
+PY
+)
+  echo "Attempt $i: visible CUDA devices = ${visible_count}"
+
+  if [[ "${visible_count}" -ge 2 ]]; then
+    echo "Found ${visible_count} CUDA devices."
+    break
+  fi
+
+  sleep 5
+done
+
+if [[ "${visible_count}" -lt 2 ]]; then
+  echo "ERROR: Expected 2 CUDA devices, but only ${visible_count} are visible after waiting."
+  echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
+  nvidia-smi || true
+  exit 1
+fi
+
 echo "[$(date)] Starting imperfect-controls train job ${SLURM_JOB_ID} in $(pwd)"
 python imperfect_controls/train.py \
   --corrupt-fraction 0.2 \
@@ -40,5 +64,7 @@ python imperfect_controls/train.py \
   --learning-rate 5e-6 \
   --num-gpus 2 \
   --run-name blur_finetune \
-  --finetune-from imperfect_controls/checkpoints/clean/last.ckpt
+  --finetune-from imperfect_controls/checkpoints/clean/last.ckpt \
+  --val-every-n-steps 100 \
+  --weights-save-every-n-steps 100
 echo "[$(date)] Train job complete."
