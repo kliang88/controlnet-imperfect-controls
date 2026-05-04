@@ -15,7 +15,6 @@ for p in (_REPO_ROOT, _SCRIPT_DIR):
 from share import *
 import config
 
-import einops
 import numpy as np
 import torch
 from PIL import Image
@@ -24,10 +23,21 @@ from pytorch_lightning import seed_everything
 from cldm.ddim_hacked import DDIMSampler
 from cldm.model import create_model, load_state_dict
 from dataset import Fill50KDataset
+from generate_image import generate_image
 
 
 def save_image(arr, path):
     Image.fromarray(arr).save(path)
+
+
+def hint_to_uint8_rgb(hint):
+    """Dataset hint is float32 RGB in [0, 1], shape H×W×3."""
+    return (np.asarray(hint) * 255.0).clip(0, 255).astype(np.uint8)
+
+
+def target_to_uint8_rgb(jpg):
+    """Dataset target (jpg key) is float32 RGB in [-1, 1], shape H×W×3."""
+    return ((np.asarray(jpg) + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
 
 
 def main():
@@ -104,7 +114,6 @@ def main():
     model.eval()
 
     sampler = DDIMSampler(model)
-    model.control_scales = [args.strength] * 13
 
     if config.save_memory:
         model.low_vram_shift(is_diffusing=False)
@@ -112,64 +121,39 @@ def main():
     prompts_file = out_dir / "prompts.txt"
 
     with open(prompts_file, "w", encoding="utf-8") as f:
-        f.write("local_i\tdataset_i\tprompt\n")
+        f.write("local_i\tdataset_i\tsample_dir\tprompt\n")
 
         for i in range(n):
             item = test_ds[i]
-
-            hint = torch.as_tensor(item["hint"]).unsqueeze(0).to(device)
-            _, h, w, _ = hint.shape
-
-            control = einops.rearrange(
-                hint, "b h w c -> b c h w"
-            ).contiguous().float()
+            dataset_i = test_ds.indices[i]
+            sample_dir = out_dir / f"test_idx_{dataset_i:05d}"
+            sample_dir.mkdir(parents=True, exist_ok=True)
 
             prompt = item["txt"]
-            full_prompt = f"{prompt}, {args.a_prompt}"
+            with open(sample_dir / "prompt.txt", "w", encoding="utf-8") as pf:
+                pf.write(prompt)
 
-            cond = {
-                "c_concat": [control],
-                "c_crossattn": [model.get_learned_conditioning([full_prompt])],
-            }
+            save_image(hint_to_uint8_rgb(item["hint"]), sample_dir / "control.png")
+            save_image(target_to_uint8_rgb(item["jpg"]), sample_dir / "target.png")
 
-            un_cond = {
-                "c_concat": [control],
-                "c_crossattn": [model.get_learned_conditioning([args.n_prompt])],
-            }
+            x = generate_image(
+                model,
+                sampler,
+                item["hint"],
+                prompt,
+                a_prompt=args.a_prompt,
+                n_prompt=args.n_prompt,
+                ddim_steps=args.ddim_steps,
+                guidance_scale=args.guidance_scale,
+                eta=args.eta,
+                strength=args.strength,
+            )
 
-            shape = (4, h // 8, w // 8)
+            save_image(x, sample_dir / "generated.png")
 
-            if config.save_memory:
-                model.low_vram_shift(is_diffusing=True)
+            f.write(f"{i}\t{dataset_i}\t{sample_dir.name}\t{prompt}\n")
 
-            with torch.inference_mode():
-                samples, _ = sampler.sample(
-                    args.ddim_steps,
-                    1,
-                    shape,
-                    cond,
-                    verbose=False,
-                    eta=args.eta,
-                    unconditional_guidance_scale=args.guidance_scale,
-                    unconditional_conditioning=un_cond,
-                )
-
-                if config.save_memory:
-                    model.low_vram_shift(is_diffusing=False)
-
-                x = model.decode_first_stage(samples)
-
-            x = einops.rearrange(x, "b c h w -> b h w c")
-            x = (x * 127.5 + 127.5).cpu().numpy()
-            x = x.clip(0, 255).astype(np.uint8)[0]
-
-            dataset_i = test_ds.indices[i]
-            out_path = out_dir / f"test_idx_{dataset_i:05d}.png"
-            save_image(x, out_path)
-
-            f.write(f"{i}\t{dataset_i}\t{prompt}\n")
-
-    print(f"Wrote {n} images to {out_dir}")
+    print(f"Wrote {n} sample folders under {out_dir}")
 
 
 if __name__ == "__main__":
