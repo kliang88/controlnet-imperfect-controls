@@ -14,6 +14,11 @@ Examples:
   python imperfect_controls/evaluate.py \\
       --checkpoint path/to.ckpt --max-samples 100 --output-json metrics.json
 
+  python imperfect_controls/evaluate.py \\
+      --checkpoint path/to.ckpt \\
+      --output-csv imperfect_controls/eval_results/run.csv \\
+      --output-summary-csv imperfect_controls/eval_results/run_summary.csv
+
   python imperfect_controls/evaluate.py --checkpoint path/to.ckpt --corrupt-fraction 0.5
 """
 
@@ -22,6 +27,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import sys
 from pathlib import Path
@@ -64,6 +70,58 @@ except ImportError:
     def tqdm(x, **kwargs):
         return x
 
+
+CSV_FIELDNAMES = [
+    "local_index",
+    "dataset_index",
+    "prompt",
+    "mask_iou",
+    "roundness_true",
+    "roundness_pred",
+    "roundness_abs_delta",
+    "radius_true",
+    "radius_pred",
+    "radius_error",
+    "center_true_x",
+    "center_true_y",
+    "center_pred_x",
+    "center_pred_y",
+    "center_error",
+    "circle_color_error",
+    "background_color_error",
+    "total_color_error",
+]
+
+
+def _csv_scalar(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def write_records_csv(path: Path, records: List[Dict[str, Any]]) -> None:
+    """Write one row per evaluated sample."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_FIELDNAMES, extrasaction="ignore")
+        writer.writeheader()
+        for row in records:
+            writer.writerow(row)
+
+
+def write_summary_csv(path: Path, summary: Dict[str, Any]) -> None:
+    """Write aggregate metrics and run metadata as a single wide row."""
+    fieldnames = sorted(summary.keys())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    row = {k: _csv_scalar(summary[k]) for k in fieldnames}
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerow(row)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -95,6 +153,18 @@ def main() -> None:
         type=str,
         default=None,
         help="Write detailed results and summary to this path.",
+    )
+    parser.add_argument(
+        "--output-csv",
+        type=str,
+        default=None,
+        help="Write per-sample metrics to this CSV path.",
+    )
+    parser.add_argument(
+        "--output-summary-csv",
+        type=str,
+        default=None,
+        help="Write aggregate summary statistics (single row) to this CSV path.",
     )
     parser.add_argument(
         "--debug-mask-dir",
@@ -285,6 +355,16 @@ def main() -> None:
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump({"summary": summary, "per_sample": records}, f, indent=2)
         print(f"Wrote {out_path}")
+
+    if args.output_csv:
+        csv_path = Path(args.output_csv).resolve()
+        write_records_csv(csv_path, records)
+        print(f"Wrote {csv_path}")
+
+    if args.output_summary_csv:
+        summary_csv = Path(args.output_summary_csv).resolve()
+        write_summary_csv(summary_csv, summary)
+        print(f"Wrote {summary_csv}")
 
 
 if __name__ == "__main__":
