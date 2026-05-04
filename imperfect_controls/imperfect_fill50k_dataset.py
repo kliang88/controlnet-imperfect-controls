@@ -139,6 +139,118 @@ def apply_hint_gaussian_noise(
     return np.clip(hint + noise, 0.0, 1.0)
 
 
+def apply_hint_patchy_strong_noise(
+    hint: np.ndarray,
+    rng: np.random.Generator,
+    *,
+    n_patches_min: int = 2,
+    n_patches_max: int = 6,
+    patch_frac_min: float = 0.05,
+    patch_frac_max: float = 0.18,
+    sigma_strong: float = 0.35,
+    sigma_background: float = 0.0,
+) -> np.ndarray:
+    """Add very strong Gaussian noise in random rectangular patches."""
+    out = np.clip(hint, 0.0, 1.0).astype(np.float32, copy=True)
+    h, w = out.shape[:2]
+
+    if sigma_background > 0:
+        bg = rng.normal(0.0, sigma_background, out.shape).astype(np.float32)
+        out = np.clip(out + bg, 0.0, 1.0)
+
+    n = int(rng.integers(n_patches_min, n_patches_max + 1))
+    for _ in range(n):
+        frac = float(rng.uniform(patch_frac_min, patch_frac_max))
+        ph = max(4, int(h * frac))
+        pw = max(4, int(w * frac))
+        ph = min(ph, h)
+        pw = min(pw, w)
+        y0 = int(rng.integers(0, max(1, h - ph + 1)))
+        x0 = int(rng.integers(0, max(1, w - pw + 1)))
+        patch = out[y0 : y0 + ph, x0 : x0 + pw]
+        noise = rng.normal(0.0, sigma_strong, patch.shape).astype(np.float32)
+        out[y0 : y0 + ph, x0 : x0 + pw] = np.clip(patch + noise, 0.0, 1.0)
+
+    return out
+
+
+def apply_hint_edge_speckle_noise(
+    hint: np.ndarray,
+    rng: np.random.Generator,
+    *,
+    band_dilate_iters: int = 10,
+    band_erode_iters: int = 2,
+    # "Displace white pixels" style corruption.
+    move_prob: float = 0.55,
+    max_displacement_px: int = 18,
+    erase_moved_prob: float = 0.9,
+    # Optional small local noise to further soften the boundary.
+    sigma_edge: float = 0.06,
+    white_floor: float = 0.72,
+) -> np.ndarray:
+    """Corrupt a band around the stroke so the edge is poorly defined.
+
+    Displaces bright stroke pixels within an edge band by up to a max distance,
+    creating a poorly-defined boundary with displaced white/gray speckles.
+    """
+    out = np.clip(hint, 0.0, 1.0).astype(np.float32, copy=True)
+    h, w = out.shape[:2]
+    edge = _hint_stroke_mask(out)
+    if not np.any(edge):
+        return out
+
+    # Create a ring/band around the edge via dilate - erode.
+    edge_u8 = edge.astype(np.uint8) * 255
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    dil = cv2.dilate(edge_u8, k, iterations=int(band_dilate_iters)) > 0
+    ero = cv2.erode(edge_u8, k, iterations=int(band_erode_iters)) > 0
+    band = dil & (~ero)
+    if not np.any(band):
+        band = dil
+
+    gray = out.mean(axis=2).astype(np.float32)
+    # "White-ish" pixels on/near the stroke within the edge band.
+    whiteish = (gray >= float(white_floor)) & band
+    ys, xs = np.where(whiteish)
+    if len(xs) == 0:
+        # Fallback: use edge pixels in the band, even if not super bright.
+        ys, xs = np.where(edge & band)
+        if len(xs) == 0:
+            return out
+
+    keep = rng.random(len(xs)).astype(np.float32) < float(move_prob)
+    ys = ys[keep]
+    xs = xs[keep]
+    if len(xs) == 0:
+        return out
+
+    r = int(max(1, max_displacement_px))
+    dy = rng.integers(-r, r + 1, size=len(xs))
+    dx = rng.integers(-r, r + 1, size=len(xs))
+    y2 = np.clip(ys + dy, 0, h - 1)
+    x2 = np.clip(xs + dx, 0, w - 1)
+
+    src = out[ys, xs]  # Nx3
+    # Jitter intensity slightly so it becomes white/gray speckles.
+    gain = rng.uniform(0.65, 1.15, size=(len(xs), 1)).astype(np.float32)
+    src = np.clip(src * gain, 0.0, 1.0)
+    # Scatter onto destination using max to preserve bright speckles.
+    out[y2, x2] = np.maximum(out[y2, x2], src)
+
+    # Optionally erase (most of) the moved-from pixels to make the edge broken.
+    if erase_moved_prob > 0:
+        erase = rng.random(len(xs)).astype(np.float32) < float(erase_moved_prob)
+        out[ys[erase], xs[erase]] *= rng.uniform(0.0, 0.35, size=(int(np.count_nonzero(erase)), 1)).astype(
+            np.float32
+        )
+
+    # Small Gaussian noise inside band to further soften boundary.
+    if sigma_edge > 0:
+        g = rng.normal(0.0, sigma_edge, out.shape).astype(np.float32)
+        out[band] = np.clip(out[band] + g[band], 0.0, 1.0)
+
+    return np.clip(out, 0.0, 1.0)
+
 def apply_hint_gaussian_blur(
     hint: np.ndarray,
     rng: np.random.Generator,
@@ -177,6 +289,8 @@ def apply_hint_gaussian_blur(
 CORRUPTION_FUNCS: Dict[str, CorruptionFn] = {
     "edge_segment_remove": apply_edge_segment_remove,
     "noise": apply_hint_gaussian_noise,
+    "noise_patchy_strong": apply_hint_patchy_strong_noise,
+    "noise_edge_speckle": apply_hint_edge_speckle_noise,
     "blur": apply_hint_gaussian_blur,
 }
 
