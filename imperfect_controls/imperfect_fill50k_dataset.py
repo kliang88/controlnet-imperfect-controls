@@ -21,34 +21,95 @@ from torch.utils.data import Dataset
 CorruptionFn = Callable[[np.ndarray, np.random.Generator], np.ndarray]
 
 
+def _hint_stroke_mask(hint: np.ndarray) -> np.ndarray:
+    """Bool mask of circle stroke / edge pixels (light line on darker canvas).
+
+    Fill50k sources are outlines; strokes are locally brighter than a heavily
+    blurred background. We also keep high-luminance pixels (near-white lines).
+    """
+    h, w = hint.shape[:2]
+    gray = hint.mean(axis=2).astype(np.float32)
+    g8 = np.clip(gray * 255.0, 0.0, 255.0).astype(np.uint8)
+    k = int(max(15, min(h, w) // 10) | 1)  # odd kernel ~10% of side
+    bg = cv2.GaussianBlur(g8, (k, k), 0).astype(np.float32) / 255.0
+    local_lift = gray - bg
+    # Stroke pops above smoothed plate; threshold is robust across stroke colors.
+    by_contrast = local_lift > 0.055
+    # Near-white ink (explicit user request); works when line is light gray/white.
+    lum_hi = np.percentile(gray, 99.0)
+    floor_white = max(0.72, float(lum_hi) * 0.92)
+    by_white = gray >= floor_white
+    edge = by_contrast | by_white
+    if not np.any(edge):
+        # Fallback: brightest few percent of pixels (thin strokes still rank high).
+        t = float(np.percentile(gray, 94.0))
+        edge = gray >= max(t, 0.35)
+    return edge
+
+
+def _count_edge_pixels_removed(hint_before: np.ndarray, out: np.ndarray, edge: np.ndarray) -> int:
+    """How many edge-mask pixels went to (near) black in ``out``."""
+    before_on_edge = hint_before[edge]
+    after_on_edge = out[edge]
+    # per-pixel max channel drop to near zero
+    dark = after_on_edge.max(axis=1) < 0.08
+    was_bright = before_on_edge.max(axis=1) > 0.2
+    return int(np.count_nonzero(dark & was_bright))
+
+
+def _place_box_on_edge(
+    out: np.ndarray, edge: np.ndarray, rng: np.random.Generator, h: int, w: int
+) -> None:
+    """Guarantee at least one box overlapping edge pixels (centered on a random edge pixel)."""
+    ys, xs = np.where(edge)
+    if len(xs) == 0:
+        return
+    i = int(rng.integers(0, len(xs)))
+    cy, cx = int(ys[i]), int(xs[i])
+    # Modest boxes (gentler than large w//5 patches).
+    bw = int(rng.integers(max(8, w // 22), max(9, w // 6 + 1)))
+    bh = int(rng.integers(max(8, h // 22), max(9, h // 6 + 1)))
+    bw = min(bw, w)
+    bh = min(bh, h)
+    bx = int(np.clip(cx - bw // 2, 0, w - bw))
+    by = int(np.clip(cy - bh // 2, 0, h - bh))
+    region = np.zeros((h, w), dtype=bool)
+    region[by : by + bh, bx : bx + bw] = True
+    out[region & edge] = 0.0
+
+
 def apply_edge_segment_remove(
     hint: np.ndarray,
     rng: np.random.Generator,
     *,
     n_boxes_min: int = 2,
-    n_boxes_max: int = 7,
-    edge_threshold_frac: float = 0.28,
-    edge_threshold_floor: float = 0.06,
+    n_boxes_max: int = 6,
+    min_edge_pixels_removed: int = 70,
+    min_edge_fraction: float = 0.0035,
 ) -> np.ndarray:
-    """Zero random rectangular regions that intersect thresholded edge pixels."""
+    """Zero random rectangles on detected stroke pixels; always removes some real edge ink.
+
+    If random boxes miss the stroke (thin lines), we add targeted boxes until
+    ``min_edge_pixels_removed`` (or fraction of edge mask) of stroke pixels are blacked.
+    Defaults are just under the original heavy settings (~10–15% gentler).
+    """
     out = hint.copy()
     h, w = out.shape[:2]
-    gray = out.mean(axis=2)
-    thr = float(
-        np.clip(
-            max(edge_threshold_floor, gray.max() * edge_threshold_frac),
-            edge_threshold_floor,
-            0.99,
-        )
-    )
-    edge = gray >= thr
+    edge = _hint_stroke_mask(hint)
     if not np.any(edge):
         return out
 
+    n_edge = int(np.count_nonzero(edge))
+    target_removed = min(
+        n_edge,
+        max(min_edge_pixels_removed, int(min_edge_fraction * n_edge)),
+    )
+
     n_boxes = int(rng.integers(n_boxes_min, n_boxes_max + 1))
     for _ in range(n_boxes):
-        bw = int(rng.integers(max(1, w // 24), max(2, w // 2 + 1)))
-        bh = int(rng.integers(max(1, h // 24), max(2, h // 2 + 1)))
+        # Slightly tighter max box than w//2 (original); min box a bit larger than w//40.
+        bw = int(rng.integers(max(1, w // 28), max(2, (w * 9 // 20) + 1)))
+        bh = int(rng.integers(max(1, h // 28), max(2, (h * 9 // 20) + 1)))
         bw = min(bw, w)
         bh = min(bh, h)
         bx = int(rng.integers(0, max(1, w - bw + 1)))
@@ -56,6 +117,15 @@ def apply_edge_segment_remove(
         region = np.zeros((h, w), dtype=bool)
         region[by : by + bh, bx : bx + bw] = True
         out[region & edge] = 0.0
+
+    removed = _count_edge_pixels_removed(hint, out, edge)
+    max_extra = 20
+    tries = 0
+    while removed < target_removed and tries < max_extra:
+        _place_box_on_edge(out, edge, rng, h, w)
+        removed = _count_edge_pixels_removed(hint, out, edge)
+        tries += 1
+
     return out
 
 
