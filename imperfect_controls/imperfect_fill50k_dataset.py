@@ -151,12 +151,14 @@ def apply_hint_gaussian_blur(
     halo_strength: float = 0.9,
     halo_gamma: float = 2.2,
 ) -> np.ndarray:
-    k = int(rng.choice(k_choices))
+    # Make blur deterministic and always pick the strongest setting.
+    # (We keep the `rng` argument for API compatibility with other corruptions.)
+    k = int(max(k_choices))
     base = np.clip(hint, 0.0, 1.0).astype(np.float32, copy=True)
 
     # Halo source (thickened).
     halo_src = base
-    dilate_iters = int(rng.choice(dilate_iter_choices))
+    dilate_iters = int(max(dilate_iter_choices))
     if dilate_iters > 0:
         dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         halo_src = cv2.dilate(halo_src, dilate_kernel, iterations=dilate_iters)
