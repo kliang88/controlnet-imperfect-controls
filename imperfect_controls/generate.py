@@ -1,4 +1,8 @@
-"""Generate images from a trained ControlNet checkpoint using Fill50K test inputs."""
+"""Generate images from a trained ControlNet checkpoint using Fill50K test inputs.
+
+By default controls (hints) are clean ``Fill50KDataset``. Pass ``--corrupt-fraction`` to use
+``DisjointCorruptFill50KDataset`` (same imperfect-controls setup as training).
+"""
 
 import argparse
 import re
@@ -24,6 +28,7 @@ from cldm.ddim_hacked import DDIMSampler
 from cldm.model import create_model, load_state_dict
 from dataset import Fill50KDataset
 from generate_image import generate_image
+from imperfect_fill50k_dataset import DisjointCorruptFill50KDataset
 
 
 def save_image(arr, path):
@@ -55,13 +60,29 @@ def main():
 
     parser.add_argument(
         "--a-prompt",
-        default="best quality, extremely detailed",
+        default="",
         help="additional prompt to guide the image generation"
     )
     parser.add_argument(
         "--n-prompt",
-        default="low quality, blurry, distorted",
+        default="",
         help="negative prompt to guide the image generation"
+    )
+    parser.add_argument(
+        "--corrupt-fraction",
+        type=float,
+        default=None,
+        metavar="P",
+        help=(
+            "If set (0..1), use DisjointCorruptFill50KDataset (corrupted hints). "
+            "If omitted, use plain Fill50KDataset (clean hints)."
+        ),
+    )
+    parser.add_argument(
+        "--corruption-type",
+        type=str,
+        default="edge_segment_remove",
+        help="Corruption name when --corrupt-fraction is set.",
     )
 
     args = parser.parse_args()
@@ -79,14 +100,27 @@ def main():
     device = torch.device("cuda")
     seed_everything(args.seed)
 
-    # Load test split. Keep this seed consistent with training.
-    test_ds = Fill50KDataset(
-        split="test",
-        train_ratio=0.8,
-        val_ratio=0.1,
-        test_ratio=0.1,
-        seed=42,
-    )
+    # Load test split. Keep this seed consistent with training / evaluate.py.
+    if args.corrupt_fraction is not None:
+        if not 0.0 <= args.corrupt_fraction <= 1.0:
+            raise ValueError("--corrupt-fraction must be in [0, 1]")
+        test_ds = DisjointCorruptFill50KDataset(
+            split="test",
+            corrupt_fraction=args.corrupt_fraction,
+            corruption_type=args.corruption_type,
+            train_ratio=0.8,
+            val_ratio=0.1,
+            test_ratio=0.1,
+            seed=42,
+        )
+    else:
+        test_ds = Fill50KDataset(
+            split="test",
+            train_ratio=0.8,
+            val_ratio=0.1,
+            test_ratio=0.1,
+            seed=42,
+        )
 
     if len(test_ds) == 0:
         raise RuntimeError("Test split is empty (check Fill50k prompt.json and split ratios).")
@@ -102,6 +136,9 @@ def main():
         out_dir = Path(args.output_dir).resolve()
     else:
         run_name = re.sub(r"[^\w.-]+", "_", ckpt.parent.name)[:64]
+        if args.corrupt_fraction is not None:
+            cf_tag = str(args.corrupt_fraction).replace(".", "p")
+            run_name = f"{run_name}_imperfect_{cf_tag}_{args.corruption_type}"[:120]
         out_dir = (_SCRIPT_DIR / "generated" / run_name).resolve()
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -121,7 +158,7 @@ def main():
     prompts_file = out_dir / "prompts.txt"
 
     with open(prompts_file, "w", encoding="utf-8") as f:
-        f.write("local_i\tdataset_i\tsample_dir\tprompt\n")
+        f.write("local_i\tdataset_i\tsample_dir\thint_corrupt\tprompt\n")
 
         for i in range(n):
             item = test_ds[i]
@@ -151,7 +188,12 @@ def main():
 
             save_image(x, sample_dir / "generated.png")
 
-            f.write(f"{i}\t{dataset_i}\t{sample_dir.name}\t{prompt}\n")
+            hint_corrupt = (
+                int(test_ds.is_corrupted_index(i))
+                if hasattr(test_ds, "is_corrupted_index")
+                else 0
+            )
+            f.write(f"{i}\t{dataset_i}\t{sample_dir.name}\t{hint_corrupt}\t{prompt}\n")
 
     print(f"Wrote {n} sample folders under {out_dir}")
 
