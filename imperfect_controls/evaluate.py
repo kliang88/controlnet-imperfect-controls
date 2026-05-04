@@ -1,13 +1,11 @@
 """Quantitative evaluation on the Fill50K test split (pixel-mask IoU).
 
-Runs inference with a checkpoint (unless ``--score-dir`` is set) and scores each sample:
+Runs inference with a checkpoint and scores each sample:
 
     IoU = |foreground_true ∩ foreground_pred| / |foreground_true ∪ foreground_pred|
 
 Foreground masks are built from RGB (corner background estimate), optionally reduced to the
 largest connected component per image.
-
-Use exactly one of ``--checkpoint`` (full inference) or ``--score-dir`` (read PNGs only; no GPU).
 
 Examples:
 
@@ -17,9 +15,6 @@ Examples:
       --checkpoint path/to.ckpt --max-samples 100 --output-json metrics.json
 
   python imperfect_controls/evaluate.py --checkpoint path/to.ckpt --corrupt-fraction 0.5
-
-  # Folders: test_idx_*/target.png & generated.png (e.g. from a separate qualitative run)
-  python imperfect_controls/evaluate.py --score-dir imperfect_controls/generated/clean
 """
 
 # TODO: need for circle with cropping / cut off at edges or corners
@@ -28,10 +23,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Tuple
+from typing import Any, Dict, List
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -46,13 +40,20 @@ import config
 
 import numpy as np
 import torch
-from PIL import Image
 from pytorch_lightning import seed_everything
 
 from cldm.ddim_hacked import DDIMSampler
-from cldm.model import create_model, load_state_dict
 from dataset import Fill50KDataset
-from eval_mask_iou import pixel_mask_iou_from_images
+from eval_helpers import (
+    color_errors_from_true_mask,
+    load_model,
+    mask_center,
+    mask_radius,
+    mask_roundness,
+    pixel_mask_iou_from_images,
+    summarize_metrics,
+    target_to_uint8_rgb,
+)
 from generate_image import generate_image
 from imperfect_fill50k_dataset import DisjointCorruptFill50KDataset
 
@@ -63,73 +64,12 @@ except ImportError:
     def tqdm(x, **kwargs):
         return x
 
-
-def target_to_uint8_rgb(jpg: np.ndarray) -> np.ndarray:
-    """Dataset target tensor: float RGB [-1, 1] -> uint8 RGB."""
-    return ((np.asarray(jpg) + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
-
-
-def load_rgb_png(path: Path) -> np.ndarray:
-    """RGB uint8 H×W×3."""
-    img = Image.open(path).convert("RGB")
-    return np.asarray(img)
-
-
-def load_model(checkpoint: Path, device: torch.device):
-    model = create_model(str(_REPO_ROOT / "models/cldm_v15.yaml")).to(device)
-    model.load_state_dict(load_state_dict(str(checkpoint), location=str(device)))
-    model.sd_locked = True
-    model.eval()
-    return model
-
-
-def iter_saved_samples(score_dir: Path) -> Iterator[Tuple[int, Path, Path]]:
-    """Yield (dataset_index, target_path, generated_path) from ``test_idx_*`` folders."""
-    for folder in sorted(score_dir.glob("test_idx_*")):
-        if not folder.is_dir():
-            continue
-        m = re.match(r"test_idx_(\d+)$", folder.name)
-        if not m:
-            continue
-        dataset_i = int(m.group(1))
-        tp = folder / "target.png"
-        gp = folder / "generated.png"
-        if tp.is_file() and gp.is_file():
-            yield dataset_i, tp, gp
-
-
-def _summarize(ious: List[float]) -> Dict[str, Any]:
-    if not ious:
-        return {
-            "count": 0,
-            "mask_iou_mean": None,
-            "mask_iou_median": None,
-            "mask_iou_std": None,
-        }
-    arr = np.asarray(ious, dtype=np.float64)
-    return {
-        "count": len(ious),
-        "mask_iou_mean": float(arr.mean()),
-        "mask_iou_median": float(np.median(arr)),
-        "mask_iou_std": float(arr.std(ddof=0)),
-    }
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--checkpoint",
-        default=None,
-        help="Lightning .ckpt (required unless --score-dir is used alone).",
-    )
-    parser.add_argument(
-        "--score-dir",
-        type=str,
-        default=None,
-        help=(
-            "Directory containing test_idx_*/target.png and generated.png. "
-            "If set without --checkpoint, only aggregates IoU from disk (no inference)."
-        ),
+        required=True,
+        help="Lightning .ckpt used for inference evaluation.",
     )
     parser.add_argument("--max-samples", type=int, default=None, help="Cap number of samples.")
     parser.add_argument("--seed", type=int, default=42)
@@ -142,7 +82,7 @@ def main() -> None:
     parser.add_argument(
         "--mask-margin",
         type=float,
-        default=18.0,
+        default=8.0,
         help="Foreground/background separation margin (RGB L2); tune if masks look wrong.",
     )
     parser.add_argument(
@@ -155,6 +95,15 @@ def main() -> None:
         type=str,
         default=None,
         help="Write detailed results and summary to this path.",
+    )
+    parser.add_argument(
+        "--debug-mask-dir",
+        type=str,
+        default=None,
+        help=(
+            "Optional directory to save per-sample binary masks used for IoU "
+            "(writes *_true_mask.png and *_pred_mask.png)."
+        ),
     )
     parser.add_argument(
         "--corrupt-fraction",
@@ -175,17 +124,10 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    score_path = Path(args.score_dir).resolve() if args.score_dir else None
-    ckpt_path = Path(args.checkpoint).resolve() if args.checkpoint else None
+    ckpt_path = Path(args.checkpoint).resolve()
 
-    if (score_path is None) == (ckpt_path is None):
-        parser.error("Provide exactly one of: --checkpoint (inference) or --score-dir (disk-only).")
-
-    if ckpt_path is not None and not ckpt_path.is_file():
+    if not ckpt_path.is_file():
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
-
-    if args.corrupt_fraction is not None and score_path is not None:
-        parser.error("--corrupt-fraction applies only to --checkpoint runs.")
 
     if args.corrupt_fraction is not None and not 0.0 <= args.corrupt_fraction <= 1.0:
         parser.error("--corrupt-fraction must be in [0, 1].")
@@ -194,51 +136,23 @@ def main() -> None:
 
     records: List[Dict[str, Any]] = []
     ious: List[float] = []
+    roundness_deltas: List[float] = []
+    radius_errors: List[float] = []
+    center_errors: List[float] = []
+    circle_color_errors: List[float] = []
+    background_color_errors: List[float] = []
+    total_color_errors: List[float] = []
     keep_largest = not args.no_keep_largest
-
-    # --- Disk-only scoring ---
-    if ckpt_path is None and score_path is not None:
-        pairs = list(iter_saved_samples(score_path))
-        if args.max_samples is not None:
-            pairs = pairs[: args.max_samples]
-        for dataset_i, tp, gp in tqdm(pairs, desc="score-disk"):
-            tgt = load_rgb_png(tp)
-            pred = load_rgb_png(gp)
-            iou, _, _ = pixel_mask_iou_from_images(
-                tgt,
-                pred,
-                margin=args.mask_margin,
-                keep_largest=keep_largest,
-            )
-            ious.append(iou)
-            rec: Dict[str, Any] = {
-                "dataset_index": dataset_i,
-                "target_path": str(tp),
-                "generated_path": str(gp),
-                "mask_iou": iou,
-            }
-            records.append(rec)
-
-        summary = _summarize(ious)
-        summary["mode"] = "score_dir"
-        summary["score_dir"] = str(score_path)
-        summary["keep_largest_component"] = keep_largest
-
-        print(json.dumps(summary, indent=2))
-        if args.output_json:
-            out_path = Path(args.output_json).resolve()
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(out_path, "w", encoding="utf-8") as f:
-                json.dump({"summary": summary, "per_sample": records}, f, indent=2)
-            print(f"Wrote {out_path}")
-        return
+    debug_mask_dir = Path(args.debug_mask_dir).resolve() if args.debug_mask_dir else None
+    if debug_mask_dir is not None:
+        debug_mask_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Inference + scoring ---
     if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is required for inference (omit --checkpoint and use --score-dir for CPU-only).")
+        raise RuntimeError("CUDA is required for inference evaluation.")
 
     device = torch.device("cuda")
-    model = load_model(ckpt_path, device)
+    model = load_model(ckpt_path, device, _REPO_ROOT)
     sampler = DDIMSampler(model)
 
     if config.save_memory:
@@ -287,24 +201,71 @@ def main() -> None:
             eta=args.eta,
             strength=args.strength,
         )
+        debug_prefix = (
+            str(debug_mask_dir / f"eval_{i:06d}_dataset_idx_{dataset_i:06d}")
+            if debug_mask_dir is not None
+            else None
+        )
 
-        iou, _, _ = pixel_mask_iou_from_images(
+        iou, true_mask, pred_mask = pixel_mask_iou_from_images(
             target_rgb,
             pred_rgb,
             margin=args.mask_margin,
             keep_largest=keep_largest,
+            debug_save_prefix=debug_prefix,
+        )
+        true_roundness = mask_roundness(true_mask)
+        pred_roundness = mask_roundness(pred_mask)
+        roundness_abs_delta = abs(pred_roundness - true_roundness)
+        true_radius = mask_radius(true_mask)
+        pred_radius = mask_radius(pred_mask)
+        radius_error = abs(pred_radius - true_radius) / true_radius if true_radius > 0.0 else 0.0
+        true_cx, true_cy = mask_center(true_mask)
+        pred_cx, pred_cy = mask_center(pred_mask)
+        center_dist = np.sqrt((pred_cx - true_cx) ** 2 + (pred_cy - true_cy) ** 2)
+        center_error = float(center_dist / true_radius) if true_radius > 0.0 else 0.0
+        circle_color_error, background_color_error, total_color_error = color_errors_from_true_mask(
+            target_rgb, pred_rgb, true_mask
         )
         ious.append(iou)
+        roundness_deltas.append(roundness_abs_delta)
+        radius_errors.append(radius_error)
+        center_errors.append(center_error)
+        circle_color_errors.append(circle_color_error)
+        background_color_errors.append(background_color_error)
+        total_color_errors.append(total_color_error)
         records.append(
             {
                 "local_index": i,
                 "dataset_index": dataset_i,
                 "prompt": prompt,
                 "mask_iou": iou,
+                "roundness_true": true_roundness,
+                "roundness_pred": pred_roundness,
+                "roundness_abs_delta": roundness_abs_delta,
+                "radius_true": true_radius,
+                "radius_pred": pred_radius,
+                "radius_error": radius_error,
+                "center_true_x": true_cx,
+                "center_true_y": true_cy,
+                "center_pred_x": pred_cx,
+                "center_pred_y": pred_cy,
+                "center_error": center_error,
+                "circle_color_error": circle_color_error,
+                "background_color_error": background_color_error,
+                "total_color_error": total_color_error,
             }
         )
 
-    summary = _summarize(ious)
+    summary = summarize_metrics(
+        ious,
+        roundness_deltas,
+        radius_errors,
+        center_errors,
+        circle_color_errors,
+        background_color_errors,
+        total_color_errors,
+    )
     summary["mode"] = "inference"
     summary["checkpoint"] = str(ckpt_path)
     summary["split"] = "test"
