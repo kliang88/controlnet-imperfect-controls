@@ -5,6 +5,8 @@ Examples:
   python imperfect_controls/train.py --max-steps 50000 --batch-size 8 --learning-rate 2e-5
   python imperfect_controls/train.py --corrupt-fraction 0.5 --run-name imperfect50
   python imperfect_controls/train.py --corrupt-fraction 0.5 --num-gpus 1 --max-steps 10
+  python imperfect_controls/train.py --finetune-from path/to/weights.ckpt --run-name ft1
+  python imperfect_controls/train.py --continue-from-checkpoint last --run-name run1
 """
 import argparse
 import re
@@ -72,21 +74,26 @@ _parser.add_argument(
     help="Number of GPUs (default 2). Use 1 for single-GPU smoke tests.",
 )
 _parser.add_argument(
-    "--resume-from-checkpoint",
+    "--finetune-from",
     type=str,
     default=None,
     metavar="PATH",
     help=(
-        "Resume optimizer + step counter from a Lightning .ckpt under the checkpoints dir "
-        "(e.g. last.ckpt). Use the literal 'last' to load <checkpoints>/<run-name>/last.ckpt."
+        "After the default SD init (models/control_sd15_ini.ckpt), load weights from this "
+        ".ckpt or .safetensors for finetuning (strict=False). Starts a fresh optimizer schedule "
+        "unless you use --continue-from-checkpoint (not combinable with that flag)."
     ),
 )
 _parser.add_argument(
-    "--save-weights-only",
-    action="store_true",
+    "--continue-from-checkpoint",
+    "--resume-from-checkpoint",
+    type=str,
+    default=None,
+    dest="continue_from_checkpoint",
+    metavar="PATH",
     help=(
-        "Write smaller checkpoints without optimizer state (default: full checkpoints so "
-        "you can resume after a node loss with --resume-from-checkpoint)."
+        "Resume full Lightning training state (weights, optimizer, global step) from this .ckpt. "
+        "Use the literal 'last' for <checkpoints>/<run-name>/last.ckpt. Alias: --resume-from-checkpoint."
     ),
 )
 _cli = _parser.parse_args()
@@ -146,6 +153,8 @@ def main():
     if num_gpus < 1:
         sys.exit("--num-gpus must be >= 1")
     _exit_if_no_cuda(num_gpus)
+    if _cli.finetune_from and _cli.continue_from_checkpoint:
+        sys.exit("Use either --finetune-from or --continue-from-checkpoint, not both.")
     # Configs
     resume_path = str(_REPO_ROOT / "models/control_sd15_ini.ckpt")
     _checkpoint_base = _SCRIPT_DIR / "checkpoints"
@@ -187,6 +196,12 @@ def main():
     # First use cpu to load models. Pytorch Lightning will automatically move it to GPUs.
     model = create_model(str(_REPO_ROOT / "models/cldm_v15.yaml")).cpu()
     model.load_state_dict(load_state_dict(resume_path, location="cpu"))
+    if _cli.finetune_from:
+        _ft = Path(_cli.finetune_from).expanduser()
+        if not _ft.is_file():
+            sys.exit("Finetune checkpoint not found: {}".format(_ft))
+        model.load_state_dict(load_state_dict(str(_ft), location="cpu"), strict=False)
+        print("Finetune: loaded weights on top of init from {}".format(_ft))
     model.learning_rate = learning_rate
     model.sd_locked = sd_locked
     model.only_mid_control = only_mid_control
@@ -229,26 +244,33 @@ def main():
             )
         )
     logger = ImageLogger(batch_frequency=logger_freq)
-    # keep the 3 lowest val/loss checkpoints and the latest checkpoint
+    # Weights-only every N steps; full state only for single best val/loss + last.ckpt (resume).
     _ckpt_tag = (
         "imperfect50-p={:.2f}-step".format(_cli.corrupt_fraction)
         if _cli.corrupt_fraction is not None
         else "fill50k-step"
     )
-    checkpoint_cb = ModelCheckpoint(
+    weights_every_n_cb = ModelCheckpoint(
         dirpath=checkpoint_dir,
-        filename="{}={{step:06d}}".format(_ckpt_tag),
+        filename="weights-{}={{step:06d}}".format(_ckpt_tag),
+        every_n_train_steps=checkpoint_every_n_train_steps,
+        save_weights_only=True,
+        save_last=False,
+        save_top_k=-1,
+        monitor=None,
+    )
+    best_and_last_cb = ModelCheckpoint(
+        dirpath=checkpoint_dir,
+        filename="{}-best-{{step:06d}}".format(_ckpt_tag),
         save_last=True,
-        save_weights_only=_cli.save_weights_only,
-        save_top_k=3,
+        save_top_k=1,
         monitor="val/loss",
         mode="min",
-        every_n_train_steps=checkpoint_every_n_train_steps,
     )
     _trainer_kw = dict(
         gpus=num_gpus,
         precision=32,
-        callbacks=[logger, checkpoint_cb],
+        callbacks=[logger, weights_every_n_cb, best_and_last_cb],
         val_check_interval=checkpoint_every_n_train_steps,
     )
     if num_gpus > 1:
@@ -258,14 +280,15 @@ def main():
     trainer = pl.Trainer(**_trainer_kw)
 
     ckpt_path = None
-    if _cli.resume_from_checkpoint:
-        if _cli.resume_from_checkpoint.strip().lower() == "last":
+    if _cli.continue_from_checkpoint:
+        _c = _cli.continue_from_checkpoint.strip()
+        if _c.lower() == "last":
             ckpt_path = str(Path(checkpoint_dir) / "last.ckpt")
         else:
-            ckpt_path = str(Path(_cli.resume_from_checkpoint).expanduser())
+            ckpt_path = str(Path(_c).expanduser())
         if not Path(ckpt_path).is_file():
-            sys.exit("Resume checkpoint not found: {}".format(ckpt_path))
-        print("Resuming training from checkpoint: {}".format(ckpt_path))
+            sys.exit("Continue checkpoint not found: {}".format(ckpt_path))
+        print("Continuing training from checkpoint: {}".format(ckpt_path))
 
     # Train
     trainer.fit(model, train_loader, val_loader, ckpt_path=ckpt_path)

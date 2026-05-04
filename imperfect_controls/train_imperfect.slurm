@@ -32,11 +32,12 @@ conda activate control
 
 echo "[$(date)] Starting imperfect-controls train job ${SLURM_JOB_ID} in $(pwd)"
 python imperfect_controls/train.py \
-  --corrupt-fraction 0.5 \
-  --corruption-type edge_segment_remove \
-  --max-steps 8000 \
-  --batch-size 4 \
-  --learning-rate 1e-5 \
+  --corrupt-fraction 0.2 \
+  --corruption-type blur \
+  --max-steps 2000 \
+  --batch-size 16 \
+  --learning-rate 5e-6 \
   --num-gpus 2 \
-  --run-name imperfect50_edge_drop
+  --run-name blur_finetune \
+  --finetune-from imperfect_controls/checkpoints/clean/last.ckpt
 echo "[$(date)] Train job complete."

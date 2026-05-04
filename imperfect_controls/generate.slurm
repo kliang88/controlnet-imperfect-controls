@@ -1,9 +1,6 @@
 #!/bin/bash
 # Baseline: Fill50K test samples with *clean* control hints (plain Fill50KDataset).
 # Submit from repo root:  sbatch imperfect_controls/generate.slurm
-#
-# Override checkpoint (trained on clean hints), e.g.:
-#   CKPT=imperfect_controls/checkpoints/clean/last.ckpt sbatch imperfect_controls/generate.slurm
 
 #SBATCH -p mit_normal_gpu
 #SBATCH -c 2
@@ -33,19 +30,13 @@ fi
 eval "$(conda shell.bash hook)"
 conda activate control
 
-CKPT="${CKPT:-imperfect_controls/checkpoints/clean/last.ckpt}"
-if [[ ! -f "${CKPT}" ]]; then
-  echo "Checkpoint not found: ${CKPT}" >&2
-  echo "Set CKPT=/path/to/clean-hint_training.ckpt before sbatch." >&2
-  exit 1
-fi
-
 echo "[$(date)] Starting baseline generate job ${SLURM_JOB_ID} in $(pwd)"
-echo "Using checkpoint: ${CKPT}"
 
 python imperfect_controls/generate.py \
-  --checkpoint "${CKPT}" \
-  --num-samples 50 \
-  --output-dir imperfect_controls/generated/baseline_slurm
+  --checkpoint imperfect_controls/checkpoints/clean/fill50k-step=step=007999.ckpt \
+  --num-samples 10 \
+  --output-dir imperfect_controls/generated/clean_blur_2 \
+  --corrupt-fraction 1 \
+  --corruption-type blur
 
 echo "[$(date)] Generate job complete."

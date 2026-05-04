@@ -3,7 +3,7 @@
 #SBATCH -p mit_normal_gpu
 #SBATCH -c 6
 #SBATCH -G 2
-#SBATCH --mem=64G
+#SBATCH --mem=96G
 #SBATCH -t 06:00:00
 #SBATCH -J train_fill50k
 #SBATCH -o train_fill50k_%j.out
