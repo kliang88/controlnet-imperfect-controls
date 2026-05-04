@@ -267,23 +267,39 @@ def apply_hint_gaussian_blur(
     # (We keep the `rng` argument for API compatibility with other corruptions.)
     k = int(max(k_choices))
     base = np.clip(hint, 0.0, 1.0).astype(np.float32, copy=True)
+    # Work in single-channel grayscale to avoid any color-channel border artifacts.
+    base_g = base.mean(axis=2).astype(np.float32)
 
     # Halo source (thickened).
-    halo_src = base
+    halo_src = base_g
     dilate_iters = int(max(dilate_iter_choices))
     if dilate_iters > 0:
         dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        halo_src = cv2.dilate(halo_src, dilate_kernel, iterations=dilate_iters)
+        halo_src = cv2.dilate(
+            halo_src,
+            dilate_kernel,
+            iterations=dilate_iters,
+            borderType=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
 
     # Big blur => wide gradient into black.
     # Using sigma proportional to k makes the transition very soft.
     sigma = float(k) / 3.5
-    halo = cv2.GaussianBlur(halo_src, (k, k), sigmaX=sigma, sigmaY=sigma)
-    halo = np.clip(halo, 0.0, 1.0)
+    # Use constant-black padding; OpenCV's default reflect padding can "mirror"
+    # bright stroke pixels at the image boundary, creating extra bright spots.
+    halo = cv2.GaussianBlur(
+        halo_src,
+        (k, k),
+        sigmaX=sigma,
+        sigmaY=sigma,
+        borderType=cv2.BORDER_CONSTANT,
+    )
+    halo = np.clip(halo, 0.0, 1.0).astype(np.float32)
     halo = np.power(halo, float(halo_gamma)) * float(halo_strength)
 
-    out = halo
-    return np.clip(out, 0.0, 1.0)
+    out = np.clip(halo, 0.0, 1.0)
+    return np.repeat(out[:, :, None], 3, axis=2)
 
 
 CORRUPTION_FUNCS: Dict[str, CorruptionFn] = {
