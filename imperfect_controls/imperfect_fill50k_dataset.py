@@ -143,14 +143,12 @@ def apply_hint_patchy_strong_noise(
     hint: np.ndarray,
     rng: np.random.Generator,
     *,
-    n_patches_min: int = 2,
-    n_patches_max: int = 6,
-    patch_frac_min: float = 0.05,
-    patch_frac_max: float = 0.18,
-    sigma_strong: float = 0.35,
+    n_patches: int = 2,
+    patch_h_px: int = 72,
+    patch_w_px: int = 72,
     sigma_background: float = 0.0,
 ) -> np.ndarray:
-    """Add very strong Gaussian noise in random rectangular patches."""
+    """Paint ``n_patches`` solid white rectangles of fixed size; origins are random."""
     out = np.clip(hint, 0.0, 1.0).astype(np.float32, copy=True)
     h, w = out.shape[:2]
 
@@ -158,18 +156,13 @@ def apply_hint_patchy_strong_noise(
         bg = rng.normal(0.0, sigma_background, out.shape).astype(np.float32)
         out = np.clip(out + bg, 0.0, 1.0)
 
-    n = int(rng.integers(n_patches_min, n_patches_max + 1))
+    ph = int(np.clip(patch_h_px, 1, h))
+    pw = int(np.clip(patch_w_px, 1, w))
+    n = int(max(1, n_patches))
     for _ in range(n):
-        frac = float(rng.uniform(patch_frac_min, patch_frac_max))
-        ph = max(4, int(h * frac))
-        pw = max(4, int(w * frac))
-        ph = min(ph, h)
-        pw = min(pw, w)
         y0 = int(rng.integers(0, max(1, h - ph + 1)))
         x0 = int(rng.integers(0, max(1, w - pw + 1)))
-        patch = out[y0 : y0 + ph, x0 : x0 + pw]
-        noise = rng.normal(0.0, sigma_strong, patch.shape).astype(np.float32)
-        out[y0 : y0 + ph, x0 : x0 + pw] = np.clip(patch + noise, 0.0, 1.0)
+        out[y0 : y0 + ph, x0 : x0 + pw] = 1.0
 
     return out
 
