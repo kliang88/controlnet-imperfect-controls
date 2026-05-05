@@ -3,7 +3,7 @@
 
 #SBATCH -p mit_preemptable
 #SBATCH -c 6
-#SBATCH -G 4
+#SBATCH -G 1
 #SBATCH --mem=96G
 #SBATCH -t 06:00:00
 #SBATCH -J train_imperfect
@@ -29,7 +29,7 @@ fi
 eval "$(conda shell.bash hook)"
 conda activate control
 
-echo "Waiting for 4 CUDA devices to become visible..."
+echo "Waiting for 1 CUDA devices to become visible..."
 for i in {1..60}; do
   visible_count=$(python - <<'PY'
 import torch
@@ -38,7 +38,7 @@ PY
 )
   echo "Attempt $i: visible CUDA devices = ${visible_count}"
 
-  if [[ "${visible_count}" -ge 4 ]]; then
+  if [[ "${visible_count}" -ge 1 ]]; then
     echo "Found ${visible_count} CUDA devices."
     break
   fi
@@ -46,8 +46,8 @@ PY
   sleep 5
 done
 
-if [[ "${visible_count}" -lt 4 ]]; then
-  echo "ERROR: Expected 4 CUDA devices, but only ${visible_count} are visible after waiting."
+if [[ "${visible_count}" -lt 1 ]]; then
+  echo "ERROR: Expected 1 CUDA devices, but only ${visible_count} are visible after waiting."
   echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
   nvidia-smi || true
   exit 1
@@ -61,7 +61,7 @@ python imperfect_controls/train.py \
   --batch-size 4 \
   --effective-batch-size 16 \
   --learning-rate 5e-6 \
-  --num-gpus 4 \
+  --num-gpus 1 \
   --run-name noise_finetune \
   --finetune-from imperfect_controls/checkpoints/clean/last.ckpt \
   --val-every-n-steps 100 \

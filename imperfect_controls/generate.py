@@ -7,6 +7,7 @@ By default controls (hints) are clean ``Fill50KDataset``. Pass ``--corrupt-fract
 import argparse
 import re
 import sys
+import textwrap
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -19,6 +20,10 @@ for p in (_REPO_ROOT, _SCRIPT_DIR):
 from share import *
 import config
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from PIL import Image
@@ -43,6 +48,21 @@ def hint_to_uint8_rgb(hint):
 def target_to_uint8_rgb(jpg):
     """Dataset target (jpg key) is float32 RGB in [-1, 1], shape H×W×3."""
     return ((np.asarray(jpg) + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
+
+
+def save_comparison_plot(control_rgb, target_rgb, generated_rgb, prompt, path):
+    """Save control, target, and generated images in one figure with the prompt as title."""
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    titles = ("Control", "Target", "Generated")
+    for ax, img, title in zip(axes, (control_rgb, target_rgb, generated_rgb), titles):
+        ax.imshow(img)
+        ax.set_title(title, fontsize=11)
+        ax.axis("off")
+    wrapped = textwrap.fill(prompt, width=96)
+    fig.suptitle(wrapped, fontsize=10)
+    fig.tight_layout(rect=[0, 0, 1, 0.92])
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
 
 
 def main():
@@ -192,8 +212,10 @@ def main():
             with open(sample_dir / "prompt.txt", "w", encoding="utf-8") as pf:
                 pf.write(prompt)
 
-            save_image(hint_to_uint8_rgb(item["hint"]), sample_dir / "control.png")
-            save_image(target_to_uint8_rgb(item["jpg"]), sample_dir / "target.png")
+            control_rgb = hint_to_uint8_rgb(item["hint"])
+            target_rgb = target_to_uint8_rgb(item["jpg"])
+            save_image(control_rgb, sample_dir / "control.png")
+            save_image(target_rgb, sample_dir / "target.png")
 
             x = generate_image(
                 model,
@@ -209,6 +231,9 @@ def main():
             )
 
             save_image(x, sample_dir / "generated.png")
+            save_comparison_plot(
+                control_rgb, target_rgb, x, prompt, sample_dir / "comparison.png"
+            )
 
             hint_corrupt = (
                 int(test_ds.is_corrupted_index(i))

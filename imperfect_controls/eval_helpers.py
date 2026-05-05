@@ -464,6 +464,7 @@ def _nan_mean_median_std(arr: np.ndarray) -> tuple[float | None, float | None, f
 def summarize_metrics(
     ious: List[float],
     roundness_deltas: List[float],
+    roundness_preds: List[float],
     radius_errors: List[float],
     center_errors: List[float],
     circle_color_errors: List[float],
@@ -479,6 +480,9 @@ def summarize_metrics(
             "roundness_abs_delta_mean": None,
             "roundness_abs_delta_median": None,
             "roundness_abs_delta_std": None,
+            "roundness_pred_mean": None,
+            "roundness_pred_median": None,
+            "roundness_pred_std": None,
             "radius_error_mean": None,
             "radius_error_median": None,
             "radius_error_std": None,
@@ -497,6 +501,7 @@ def summarize_metrics(
         }
     arr = np.asarray(ious, dtype=np.float64)
     r_arr = np.asarray(roundness_deltas, dtype=np.float64) if roundness_deltas else np.asarray([], dtype=np.float64)
+    rp_arr = np.asarray(roundness_preds, dtype=np.float64) if roundness_preds else np.asarray([], dtype=np.float64)
     rad_arr = np.asarray(radius_errors, dtype=np.float64) if radius_errors else np.asarray([], dtype=np.float64)
     ctr_arr = np.asarray(center_errors, dtype=np.float64) if center_errors else np.asarray([], dtype=np.float64)
     circ_col_arr = (
@@ -520,6 +525,9 @@ def summarize_metrics(
         "roundness_abs_delta_mean": float(r_arr.mean()) if r_arr.size > 0 else None,
         "roundness_abs_delta_median": float(np.median(r_arr)) if r_arr.size > 0 else None,
         "roundness_abs_delta_std": float(r_arr.std(ddof=0)) if r_arr.size > 0 else None,
+        "roundness_pred_mean": float(rp_arr.mean()) if rp_arr.size > 0 else None,
+        "roundness_pred_median": float(np.median(rp_arr)) if rp_arr.size > 0 else None,
+        "roundness_pred_std": float(rp_arr.std(ddof=0)) if rp_arr.size > 0 else None,
         "radius_error_mean": r_mean,
         "radius_error_median": r_med,
         "radius_error_std": r_std,
@@ -538,18 +546,23 @@ def summarize_metrics(
     }
 
 
-def color_errors_from_true_mask(
+def color_errors_from_mask(
     rgb_true: np.ndarray,
     rgb_pred: np.ndarray,
-    true_mask: np.ndarray,
+    mask: np.ndarray,
 ) -> Tuple[float, float, float]:
+    """Mean per-pixel RGB error (pred vs true) over foreground (mask>0) and background.
+
+    ``mask`` selects which pixels count as circle vs background for aggregation only;
+    per-pixel error is always ``||rgb_pred - rgb_true||`` in normalized L2.
+    """
     true_f = rgb_true.astype(np.float32)
     pred_f = rgb_pred.astype(np.float32)
     # Normalize RGB L2 by the maximum possible distance so errors are in [0, 1].
     max_rgb_l2 = np.sqrt(3.0 * (255.0**2))
     per_pixel_l2 = np.linalg.norm(pred_f - true_f, axis=-1) / max_rgb_l2
 
-    circle = true_mask > 0
+    circle = mask > 0
     background = ~circle
 
     circle_err = float(np.clip(per_pixel_l2[circle].mean(), 0.0, 1.0)) if np.any(circle) else 0.0

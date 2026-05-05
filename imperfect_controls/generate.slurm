@@ -33,10 +33,10 @@ conda activate control
 echo "[$(date)] Starting baseline generate job ${SLURM_JOB_ID} in $(pwd)"
 
 python imperfect_controls/generate.py \
-  --checkpoint imperfect_controls/checkpoints/clean/fill50k-step=step=007999.ckpt \
+  --checkpoint imperfect_controls/checkpoints/noise_finetune/imperfect50-p=0.20-step-best-step=000499.ckpt \
   --num-samples 10 \
-  --output-dir imperfect_controls/generated/clean_blur_2 \
+  --output-dir imperfect_controls/generated/noise_finetune \
   --corrupt-fraction 1 \
-  --corruption-type blur
+  --corruption-type noise
 
 echo "[$(date)] Generate job complete."

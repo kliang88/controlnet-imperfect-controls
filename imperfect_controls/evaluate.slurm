@@ -30,9 +30,9 @@ conda activate control
 
 echo "[$(date)] Starting evaluate job ${SLURM_JOB_ID} in $(pwd)"
 python imperfect_controls/evaluate.py \
-  --checkpoint imperfect_controls/checkpoints/clean/fill50k-step=step=007999.ckpt \
-  --output-csv imperfect_controls/eval_results/clean.csv \
-  --output-summary-csv imperfect_controls/eval_results/clean_summary.csv \
-  --max-samples 5 \
-  --debug-mask-dir imperfect_controls/debug_masks/clean
+  --checkpoint imperfect_controls/checkpoints/blur_finetune/imperfect50-p=0.20-step-best-step=000499.ckpt \
+  --output-csv imperfect_controls/eval_results/blur_finetune.csv \
+  --output-summary-csv imperfect_controls/eval_results/blur_finetune_summary.csv \
+  --max-samples 10 \
+  --debug-mask-dir imperfect_controls/debug_masks/blur_finetune
 echo "[$(date)] Evaluate job complete."

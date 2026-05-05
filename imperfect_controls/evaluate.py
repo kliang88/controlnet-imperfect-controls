@@ -6,8 +6,12 @@ Runs inference with a checkpoint and scores each sample:
 
 When both foreground masks are empty, IoU is defined as 1.0 (vacuous agreement).
 
-Foreground masks use Lab distance from an estimated border background (margin threshold with
-Otsu fallback), optionally reduced to the largest connected component per image.
+Color error metrics use the same per-pixel RGB difference, but circle vs
+background means are taken over the **predicted** extracted mask (not the target mask).
+
+Foreground masks use Lab distance from an estimated dominant border background.
+A fixed margin threshold is used by default; Otsu thresholding on normalized distance
+is used when margin <= 0 or when the fixed threshold produces an empty mask.
 
 Examples:
 
@@ -22,9 +26,6 @@ Examples:
       --output-summary-csv imperfect_controls/eval_results/run_summary.csv
 
   python imperfect_controls/evaluate.py --checkpoint path/to.ckpt --corrupt-fraction 0.5
-
-  # Folders: test_idx_*/target.png & generated.png (e.g. from a separate qualitative run)
-  python imperfect_controls/evaluate.py --score-dir imperfect_controls/generated/clean
 """
 
 # TODO: need for circle with cropping / cut off at edges or corners
@@ -49,6 +50,10 @@ for _p in (_REPO_ROOT, _SCRIPT_DIR):
 from share import *
 import config
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from pytorch_lightning import seed_everything
@@ -56,7 +61,7 @@ from pytorch_lightning import seed_everything
 from cldm.ddim_hacked import DDIMSampler
 from dataset import Fill50KDataset
 from eval_helpers import (
-    color_errors_from_true_mask,
+    color_errors_from_mask,
     load_model,
     mask_center,
     mask_radius,
@@ -117,14 +122,93 @@ def write_records_csv(path: Path, records: List[Dict[str, Any]]) -> None:
 
 
 def write_summary_csv(path: Path, summary: Dict[str, Any]) -> None:
-    """Write aggregate metrics and run metadata as a single wide row."""
-    fieldnames = sorted(summary.keys())
+    """Write aggregate summary statistics in a readable long format."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    row = {k: _csv_scalar(summary[k]) for k in fieldnames}
+
+    metric_groups = [
+        ("mask", "mask_iou"),
+        ("shape", "roundness_abs_delta"),
+        ("shape", "roundness_pred"),
+        ("shape", "radius_error"),
+        ("shape", "center_error"),
+        ("color", "circle_color_error"),
+        ("color", "background_color_error"),
+        ("color", "total_color_error"),
+    ]
+
+    metadata_keys = [
+        "mode",
+        "checkpoint",
+        "split",
+        "count",
+        "eval_sample_count",
+        "corrupt_fraction",
+        "corruption_type",
+        "only_corrupted",
+        "ddim_steps",
+        "guidance_scale",
+        "strength",
+        "keep_largest_component",
+    ]
+
+    rows: List[Dict[str, str]] = []
+
+    for section, metric in metric_groups:
+        rows.append(
+            {
+                "section": section,
+                "metric": metric,
+                "mean": _csv_scalar(summary.get(f"{metric}_mean")),
+                "median": _csv_scalar(summary.get(f"{metric}_median")),
+                "std": _csv_scalar(summary.get(f"{metric}_std")),
+                "value": "",
+            }
+        )
+
+    for key in metadata_keys:
+        if key in summary:
+            rows.append(
+                {
+                    "section": "run",
+                    "metric": key,
+                    "mean": "",
+                    "median": "",
+                    "std": "",
+                    "value": _csv_scalar(summary.get(key)),
+                }
+            )
+
+    fieldnames = ["section", "metric", "mean", "median", "std", "value"]
+
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerow(row)
+        writer.writerows(rows)
+
+
+def save_debug_mask_panel(
+    out_path: Path,
+    target_rgb: np.ndarray,
+    true_mask: np.ndarray,
+    pred_rgb: np.ndarray,
+    pred_mask: np.ndarray,
+) -> None:
+    """2×2 layout: target | true mask; generated | pred mask."""
+    fig, axes = plt.subplots(2, 2, figsize=(12, 12))
+    axes[0, 0].imshow(target_rgb)
+    axes[0, 0].set_title("Target")
+    axes[0, 1].imshow(true_mask, cmap="gray", vmin=0, vmax=255)
+    axes[0, 1].set_title("True extracted mask")
+    axes[1, 0].imshow(pred_rgb)
+    axes[1, 0].set_title("Generated")
+    axes[1, 1].imshow(pred_mask, cmap="gray", vmin=0, vmax=255)
+    axes[1, 1].set_title("Pred extracted mask")
+    for ax in axes.flat:
+        ax.axis("off")
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
 
 
 def main() -> None:
@@ -173,15 +257,15 @@ def main() -> None:
         "--output-summary-csv",
         type=str,
         default=None,
-        help="Write aggregate summary statistics (single row) to this CSV path.",
+        help="Write aggregate summary statistics and run metadata to this CSV path.",
     )
     parser.add_argument(
         "--debug-mask-dir",
         type=str,
         default=None,
         help=(
-            "Optional directory to save per-sample binary masks used for IoU "
-            "(writes *_true_mask.png and *_pred_mask.png)."
+            "Optional directory for IoU debug artifacts per sample: *_true_mask.png, "
+            "*_pred_mask.png, and *_panel.png (2×2: target | true mask; generated | pred mask)."
         ),
     )
     parser.add_argument(
@@ -227,6 +311,7 @@ def main() -> None:
     records: List[Dict[str, Any]] = []
     ious: List[float] = []
     roundness_deltas: List[float] = []
+    roundness_preds: List[float] = []
     radius_errors: List[float] = []
     center_errors: List[float] = []
     circle_color_errors: List[float] = []
@@ -311,6 +396,14 @@ def main() -> None:
             keep_largest=keep_largest,
             debug_save_prefix=debug_prefix,
         )
+        if debug_prefix is not None:
+            save_debug_mask_panel(
+                Path(f"{debug_prefix}_panel.png"),
+                target_rgb,
+                true_mask,
+                pred_rgb,
+                pred_mask,
+            )
         true_roundness = mask_roundness(true_mask)
         pred_roundness = mask_roundness(pred_mask)
         roundness_abs_delta = abs(pred_roundness - true_roundness)
@@ -327,11 +420,12 @@ def main() -> None:
         center_error = (
             float(center_dist / true_radius) if true_radius > 0.0 else float("nan")
         )
-        circle_color_error, background_color_error, total_color_error = color_errors_from_true_mask(
-            target_rgb, pred_rgb, true_mask
+        circle_color_error, background_color_error, total_color_error = color_errors_from_mask(
+            target_rgb, pred_rgb, pred_mask
         )
         ious.append(iou)
         roundness_deltas.append(roundness_abs_delta)
+        roundness_preds.append(pred_roundness)
         radius_errors.append(radius_error)
         center_errors.append(center_error)
         circle_color_errors.append(circle_color_error)
@@ -363,6 +457,7 @@ def main() -> None:
     summary = summarize_metrics(
         ious,
         roundness_deltas,
+        roundness_preds,
         radius_errors,
         center_errors,
         circle_color_errors,
