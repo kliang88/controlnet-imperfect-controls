@@ -80,6 +80,17 @@ _parser.add_argument(
     help="Corruption name when --corrupt-fraction is set (default edge_segment_remove).",
 )
 _parser.add_argument(
+    "--corruption-types",
+    type=str,
+    default=None,
+    metavar="LIST",
+    help=(
+        "Optional comma-separated list of corruption names (e.g. 'blur,noise'). When set with "
+        "--corrupt-fraction, the corrupted subset is split as evenly as possible across these types. "
+        "If omitted, uses --corruption-type."
+    ),
+)
+_parser.add_argument(
     "--num-gpus",
     type=int,
     default=None,
@@ -226,15 +237,30 @@ def main():
             sys.exit("--weights-save-every-n-steps must be >= 1")
         weights_save_every_n_steps = _cli.weights_save_every_n_steps
 
+    corruption_types = None
     if _cli.corrupt_fraction is not None:
         if not 0.0 <= _cli.corrupt_fraction <= 1.0:
             sys.exit("--corrupt-fraction must be between 0 and 1")
-        if _cli.corruption_type not in CORRUPTION_FUNCS:
-            sys.exit(
-                "unknown --corruption-type; choose one of: {}".format(
-                    ", ".join(sorted(CORRUPTION_FUNCS.keys()))
+        if _cli.corruption_types is not None:
+            raw = [s.strip() for s in _cli.corruption_types.split(",")]
+            corruption_types = [s for s in raw if s]
+            if len(corruption_types) == 0:
+                sys.exit("--corruption-types must be a comma-separated list of corruption names")
+            bad = [c for c in corruption_types if c not in CORRUPTION_FUNCS]
+            if bad:
+                sys.exit(
+                    "unknown --corruption-types entries: {}; choose from: {}".format(
+                        ", ".join(bad),
+                        ", ".join(sorted(CORRUPTION_FUNCS.keys())),
+                    )
                 )
-            )
+        else:
+            if _cli.corruption_type not in CORRUPTION_FUNCS:
+                sys.exit(
+                    "unknown --corruption-type; choose one of: {}".format(
+                        ", ".join(sorted(CORRUPTION_FUNCS.keys()))
+                    )
+                )
 
     micro_per_optimizer_step = batch_size * num_gpus
     if effective_batch_size % micro_per_optimizer_step != 0:
@@ -289,6 +315,7 @@ def main():
         _ds_kw = dict(
             corrupt_fraction=_cli.corrupt_fraction,
             corruption_type=_cli.corruption_type,
+            corruption_types=corruption_types,
             **_split_kw,
         )
         train_dataset = DisjointCorruptFill50KDataset(split="train", **_ds_kw)
@@ -311,10 +338,15 @@ def main():
         n_corrupt_tr = sum(
             1 for i in range(n_tr) if train_dataset.is_corrupted_index(i)
         )
+        ct_msg = (
+            ",".join(corruption_types)
+            if corruption_types is not None
+            else _cli.corruption_type
+        )
         print(
-            "Imperfect dataset: corrupt_fraction={} type={} | train corrupted indices: {}/{}".format(
+            "Imperfect dataset: corrupt_fraction={} type(s)={} | train corrupted indices: {}/{}".format(
                 _cli.corrupt_fraction,
-                _cli.corruption_type,
+                ct_msg,
                 n_corrupt_tr,
                 n_tr,
             )

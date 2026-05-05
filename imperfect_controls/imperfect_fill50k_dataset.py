@@ -437,6 +437,7 @@ class DisjointCorruptFill50KDataset(Dataset):
         *,
         corrupt_fraction: float = 0.2,
         corruption_type: str = "edge_segment_remove",
+        corruption_types: Optional[List[str]] = None,
         train_ratio: float = 0.8,
         val_ratio: float = 0.1,
         test_ratio: float = 0.1,
@@ -452,11 +453,23 @@ class DisjointCorruptFill50KDataset(Dataset):
             raise ValueError("train_ratio + val_ratio + test_ratio must equal 1.0")
         if not 0.0 <= corrupt_fraction <= 1.0:
             raise ValueError("corrupt_fraction must be in [0, 1]")
-        if corruption_type not in CORRUPTION_FUNCS:
-            raise ValueError(
-                f"unknown corruption_type={corruption_type!r}; "
-                f"expected one of: {sorted(CORRUPTION_FUNCS)}"
-            )
+
+        if corruption_types is not None:
+            if not isinstance(corruption_types, list) or len(corruption_types) == 0:
+                raise ValueError("corruption_types must be a non-empty list of strings")
+            for ct in corruption_types:
+                if ct not in CORRUPTION_FUNCS:
+                    raise ValueError(
+                        f"unknown corruption_types entry {ct!r}; expected one of: {sorted(CORRUPTION_FUNCS)}"
+                    )
+            _corruption_types = list(corruption_types)
+        else:
+            if corruption_type not in CORRUPTION_FUNCS:
+                raise ValueError(
+                    f"unknown corruption_type={corruption_type!r}; "
+                    f"expected one of: {sorted(CORRUPTION_FUNCS)}"
+                )
+            _corruption_types = [corruption_type]
 
         base_dir = Path(__file__).resolve().parent
         self.dataset_root = base_dir / "training" / "fill50k"
@@ -486,9 +499,20 @@ class DisjointCorruptFill50KDataset(Dataset):
         )
         perm = rng_part.permutation(n_local)
         n_corrupt = int(round(n_local * corrupt_fraction))
-        corrupt_locals = set(perm[:n_corrupt].tolist())
-        self._corrupt_locals = corrupt_locals
-        self._corrupt_fn = CORRUPTION_FUNCS[corruption_type]
+        corrupt_local_list = perm[:n_corrupt].tolist()
+        self._corrupt_locals = set(corrupt_local_list)
+        # Assign corruption types evenly across corrupted indices (difference <= 1).
+        self._corruption_types = _corruption_types
+        if len(_corruption_types) == 1:
+            self._corrupt_fn_by_local = None
+            self._corrupt_fn = CORRUPTION_FUNCS[_corruption_types[0]]
+        else:
+            self._corrupt_fn = None
+            k = len(_corruption_types)
+            self._corrupt_fn_by_local = {
+                int(local_idx): CORRUPTION_FUNCS[_corruption_types[i % k]]
+                for i, local_idx in enumerate(corrupt_local_list)
+            }
         split_id = {"train": 0, "val": 1, "test": 2}[split]
         self._corrupt_sample_seed = int(seed) + 31_337 + split_id
 
@@ -519,6 +543,12 @@ class DisjointCorruptFill50KDataset(Dataset):
             rng = np.random.default_rng(
                 np.random.SeedSequence([self._corrupt_sample_seed, global_idx])
             )
-            source = self._corrupt_fn(source, rng)
+            if self._corrupt_fn is not None:
+                source = self._corrupt_fn(source, rng)
+            else:
+                fn = self._corrupt_fn_by_local.get(int(idx))
+                if fn is None:
+                    raise RuntimeError("corrupt index missing corruption fn assignment")
+                source = fn(source, rng)
 
         return dict(jpg=target, txt=prompt, hint=source)
