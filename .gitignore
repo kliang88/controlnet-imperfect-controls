@@ -150,3 +150,4 @@ log_outputs/
 imperfect_controls/generated/
 imperfect_controls/eval_results/
 imperfect_controls/debug_masks/
+*.slurm
