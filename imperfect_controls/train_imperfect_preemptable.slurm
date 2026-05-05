@@ -64,6 +64,5 @@ python imperfect_controls/train.py \
   --num-gpus 1 \
   --run-name noise_finetune \
   --finetune-from imperfect_controls/checkpoints/clean/last.ckpt \
-  --val-every-n-steps 100 \
-  --weights-save-every-n-steps 100
+  --val-every-n-steps 100
 echo "[$(date)] Train job complete."

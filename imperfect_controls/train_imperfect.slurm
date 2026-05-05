@@ -1,6 +1,6 @@
 #!/bin/bash
-# Train ControlNet on Fill50K with disjoint corrupted controls (edge_segment_remove).
-# Checkpoints: imperfect_controls/checkpoints/imperfect50_edge_drop/
+# Finetune ControlNet on Fill50K with disjoint corrupted controls (noise_edge_speckle).
+# Checkpoints: imperfect_controls/checkpoints/noise_edge_speckle_finetune/ (per --run-name)
 
 #SBATCH -p mit_normal_gpu
 #SBATCH -c 6
@@ -57,13 +57,13 @@ fi
 echo "[$(date)] Starting imperfect-controls train job ${SLURM_JOB_ID} in $(pwd)"
 python imperfect_controls/train.py \
   --corrupt-fraction 0.2 \
-  --corruption-type blur \
+  --corruption-type "noise_edge_speckle" \
   --max-steps 500 \
   --batch-size 4 \
   --effective-batch-size 16 \
   --learning-rate 5e-6 \
   --num-gpus 2 \
-  --run-name blur_finetune \
+  --run-name noise_edge_speckle_finetune \
   --finetune-from imperfect_controls/checkpoints/clean/last.ckpt \
   --val-every-n-steps 100 \
   --weights-save-every-n-steps 100

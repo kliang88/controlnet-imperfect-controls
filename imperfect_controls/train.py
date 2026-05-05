@@ -101,8 +101,8 @@ _parser.add_argument(
     default=None,
     metavar="N",
     help=(
-        "Save weights-only checkpoints every N optimizer/global steps via ModelCheckpoint "
-        "every_n_train_steps (default 500)."
+        "If set, save weights-only checkpoints every N optimizer/global steps via ModelCheckpoint "
+        "every_n_train_steps. If omitted, only best (val/loss) and last.ckpt are saved."
     ),
 )
 _parser.add_argument(
@@ -197,7 +197,6 @@ def main():
     batch_size = 4  # per-GPU micro-batch; accumulation targets effective_batch_size
     logger_freq = 300
     val_every_n_steps = 500
-    weights_save_every_n_steps = 500
     learning_rate = 1e-5
     sd_locked = True
     only_mid_control = False
@@ -221,6 +220,7 @@ def main():
         if _cli.val_every_n_steps < 1:
             sys.exit("--val-every-n-steps must be >= 1")
         val_every_n_steps = _cli.val_every_n_steps
+    weights_save_every_n_steps = None
     if _cli.weights_save_every_n_steps is not None:
         if _cli.weights_save_every_n_steps < 1:
             sys.exit("--weights-save-every-n-steps must be >= 1")
@@ -256,12 +256,16 @@ def main():
             effective_batch_size,
         )
     )
+    _wmsg = (
+        "weights-only checkpoint every_n_train_steps={}".format(weights_save_every_n_steps)
+        if weights_save_every_n_steps is not None
+        else "periodic weights-only checkpoints disabled (best + last only)"
+    )
     print(
-        "Validation every {} optimizer steps -> val_check_interval={} training batches; "
-        "weights-only checkpoint every_n_train_steps={}".format(
+        "Validation every {} optimizer steps -> val_check_interval={} training batches; {}".format(
             val_every_n_steps,
             val_check_interval_batches,
-            weights_save_every_n_steps,
+            _wmsg,
         )
     )
 
@@ -316,21 +320,25 @@ def main():
             )
         )
     logger = ImageLogger(batch_frequency=logger_freq)
-    # Weights-only every N steps; full state only for single best val/loss + last.ckpt (resume).
+    # Optional weights-only every N steps; always keep best val/loss + last.ckpt (resume).
     _ckpt_tag = (
         "imperfect50-p={:.2f}-step".format(_cli.corrupt_fraction)
         if _cli.corrupt_fraction is not None
         else "fill50k-step"
     )
-    weights_every_n_cb = ModelCheckpoint(
-        dirpath=checkpoint_dir,
-        filename="weights-{}={{step:06d}}".format(_ckpt_tag),
-        every_n_train_steps=weights_save_every_n_steps,
-        save_weights_only=True,
-        save_last=False,
-        save_top_k=-1,
-        monitor=None,
-    )
+    _callbacks = [logger]
+    if weights_save_every_n_steps is not None:
+        _callbacks.append(
+            ModelCheckpoint(
+                dirpath=checkpoint_dir,
+                filename="weights-{}={{step:06d}}".format(_ckpt_tag),
+                every_n_train_steps=weights_save_every_n_steps,
+                save_weights_only=True,
+                save_last=False,
+                save_top_k=-1,
+                monitor=None,
+            )
+        )
     best_and_last_cb = ModelCheckpoint(
         dirpath=checkpoint_dir,
         filename="{}-best-{{step:06d}}".format(_ckpt_tag),
@@ -339,10 +347,11 @@ def main():
         monitor="val/loss",
         mode="min",
     )
+    _callbacks.append(best_and_last_cb)
     _trainer_kw = dict(
         gpus=num_gpus,
         precision=32,
-        callbacks=[logger, weights_every_n_cb, best_and_last_cb],
+        callbacks=_callbacks,
         val_check_interval=val_check_interval_batches,
         accumulate_grad_batches=accumulate_grad_batches,
     )
