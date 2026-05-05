@@ -357,12 +357,35 @@ def apply_hint_gaussian_blur(
     return np.repeat(out[:, :, None], 3, axis=2)
 
 
+def apply_hint_downsample(
+    hint: np.ndarray,
+    rng: np.random.Generator,
+    *,
+    factor: int = 16,
+) -> np.ndarray:
+    """Low-resolution control: shrink by ``factor`` then upscale to original size.
+
+    Downscaling uses area interpolation; upscaling uses nearest neighbor so the
+    control looks like a coarse pixel grid (typical ``factor`` 8).
+    """
+    _ = rng  # deterministic; keeps CorruptionFn signature
+    x = np.clip(hint, 0.0, 1.0).astype(np.float32, copy=True)
+    h, w = x.shape[:2]
+    f = int(max(2, factor))
+    nh = max(1, h // f)
+    nw = max(1, w // f)
+    small = cv2.resize(x, (nw, nh), interpolation=cv2.INTER_AREA)
+    out = cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
+    return np.clip(out.astype(np.float32), 0.0, 1.0)
+
+
 CORRUPTION_FUNCS: Dict[str, CorruptionFn] = {
     "edge_segment_remove": apply_edge_segment_remove,
     "noise": apply_hint_gaussian_noise,
     "noise_patchy_strong": apply_hint_patchy_strong_noise,
     "noise_edge_speckle": apply_hint_edge_speckle_noise,
     "blur": apply_hint_gaussian_blur,
+    "downsample": apply_hint_downsample,
 }
 
 
