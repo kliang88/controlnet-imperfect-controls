@@ -143,12 +143,17 @@ def apply_hint_patchy_strong_noise(
     hint: np.ndarray,
     rng: np.random.Generator,
     *,
-    n_patches: int = 2,
-    patch_h_px: int = 72,
-    patch_w_px: int = 72,
+    n_arcs: int = 2,
+    arc_radius_frac: float = 0.14,
+    sweep_deg: float = 108.0,
+    arc_thickness_frac: float = 0.002,
     sigma_background: float = 0.0,
 ) -> np.ndarray:
-    """Paint ``n_patches`` solid white rectangles of fixed size; origins are random."""
+    """Paint solid white circular arcs: same radius and sweep, random centers/angles.
+
+    Each arc is drawn with ``cv2.ellipse`` (stroke only). All arcs share identical
+    pixel radius and angular span; only placement (center + start angle) varies.
+    """
     out = np.clip(hint, 0.0, 1.0).astype(np.float32, copy=True)
     h, w = out.shape[:2]
 
@@ -156,15 +161,45 @@ def apply_hint_patchy_strong_noise(
         bg = rng.normal(0.0, sigma_background, out.shape).astype(np.float32)
         out = np.clip(out + bg, 0.0, 1.0)
 
-    ph = int(np.clip(patch_h_px, 1, h))
-    pw = int(np.clip(patch_w_px, 1, w))
-    n = int(max(1, n_patches))
-    for _ in range(n):
-        y0 = int(rng.integers(0, max(1, h - ph + 1)))
-        x0 = int(rng.integers(0, max(1, w - pw + 1)))
-        out[y0 : y0 + ph, x0 : x0 + pw] = 1.0
+    short = float(min(h, w))
+    R = max(4, int(round(float(arc_radius_frac) * short)))
+    thick = max(2, int(round(float(arc_thickness_frac) * short)))
+    sweep = float(sweep_deg)
+    n = int(max(1, n_arcs))
 
-    return out
+    # Shrink radius until arcs fit with margin (bounding circle + stroke).
+    for _ in range(32):
+        margin = R + thick + 2
+        if margin * 2 < w and margin * 2 < h:
+            break
+        R = max(4, R - 1)
+    margin = R + thick + 2
+    if margin * 2 >= w or margin * 2 >= h:
+        return out
+
+    x_lo, x_hi = margin, w - margin
+    y_lo, y_hi = margin, h - margin
+    layer = np.zeros((h, w), dtype=np.uint8)
+    for _ in range(n):
+        cx = int(rng.integers(x_lo, x_hi))
+        cy = int(rng.integers(y_lo, y_hi))
+        a0 = float(rng.uniform(0.0, 360.0))
+        a1 = a0 + sweep
+        cv2.ellipse(
+            layer,
+            (cx, cy),
+            (R, R),
+            0.0,
+            a0,
+            a1,
+            255,
+            thick,
+            cv2.LINE_AA,
+        )
+
+    m = layer > 0
+    out[m] = 1.0
+    return np.clip(out, 0.0, 1.0)
 
 
 def apply_hint_edge_speckle_noise(
