@@ -15,17 +15,16 @@ is used when margin <= 0 or when the fixed threshold produces an empty mask.
 
 Examples:
 
-  python imperfect_controls/evaluate.py --checkpoint imperfect_controls/checkpoints/run/latest.ckpt
+  python imperfect_controls/evaluate.py \\
+      --checkpoint imperfect_controls/checkpoints/run/latest.ckpt \\
+      --output-dir imperfect_controls/eval_results/run1
+
+  Writes ``per_sample_metrics.csv`` and ``summary.csv`` under ``--output-dir``.
 
   python imperfect_controls/evaluate.py \\
-      --checkpoint path/to.ckpt --max-samples 100 --output-json metrics.json
-
-  python imperfect_controls/evaluate.py \\
-      --checkpoint path/to.ckpt \\
-      --output-csv imperfect_controls/eval_results/run.csv \\
-      --output-summary-csv imperfect_controls/eval_results/run_summary.csv
-
-  python imperfect_controls/evaluate.py --checkpoint path/to.ckpt --corrupt-fraction 0.5
+      --checkpoint path/to.ckpt --max-samples 100 \\
+      --output-dir imperfect_controls/eval_results/smoke \\
+      --corrupt-fraction 0.5
 """
 
 # TODO: need for circle with cropping / cut off at edges or corners
@@ -34,7 +33,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
@@ -71,7 +69,7 @@ from eval_helpers import (
     target_to_uint8_rgb,
 )
 from generate_image import generate_image
-from imperfect_fill50k_dataset import DisjointCorruptFill50KDataset
+from imperfect_fill50k_dataset import CORRUPTION_FUNCS, DisjointCorruptFill50KDataset
 
 try:
     from tqdm import tqdm
@@ -80,6 +78,9 @@ except ImportError:
     def tqdm(x, **kwargs):
         return x
 
+
+EVAL_PER_SAMPLE_CSV_NAME = "per_sample_metrics.csv"
+EVAL_SUMMARY_CSV_NAME = "summary.csv"
 
 CSV_FIELDNAMES = [
     "local_index",
@@ -242,22 +243,14 @@ def main() -> None:
         help="Do not reduce masks to the largest connected component before IoU.",
     )
     parser.add_argument(
-        "--output-json",
+        "--output-dir",
         type=str,
-        default=None,
-        help="Write detailed results and summary to this path.",
-    )
-    parser.add_argument(
-        "--output-csv",
-        type=str,
-        default=None,
-        help="Write per-sample metrics to this CSV path.",
-    )
-    parser.add_argument(
-        "--output-summary-csv",
-        type=str,
-        default=None,
-        help="Write aggregate summary statistics and run metadata to this CSV path.",
+        required=True,
+        help=(
+            f"Directory for evaluation artifacts: `{EVAL_PER_SAMPLE_CSV_NAME}` "
+            f"(one row per sample) and `{EVAL_SUMMARY_CSV_NAME}` "
+            "(aggregates + run metadata). Created if missing."
+        ),
     )
     parser.add_argument(
         "--debug-mask-dir",
@@ -285,6 +278,17 @@ def main() -> None:
         help="Corruption name when --corrupt-fraction is set.",
     )
     parser.add_argument(
+        "--corruption-types",
+        type=str,
+        default=None,
+        metavar="LIST",
+        help=(
+            "Optional comma-separated list of corruption names (e.g. 'blur,noise'). "
+            "When set with --corrupt-fraction, corrupted indices are split as evenly "
+            "as possible across these types. If omitted, uses --corruption-type."
+        ),
+    )
+    parser.add_argument(
         "--only-corrupted",
         action="store_true",
         help=(
@@ -305,6 +309,30 @@ def main() -> None:
 
     if args.only_corrupted and args.corrupt_fraction is None:
         parser.error("--only-corrupted requires --corrupt-fraction.")
+
+    corruption_types = None
+    if args.corrupt_fraction is not None:
+        if args.corruption_types is not None:
+            raw = [s.strip() for s in args.corruption_types.split(",")]
+            corruption_types = [s for s in raw if s]
+            if len(corruption_types) == 0:
+                parser.error(
+                    "--corruption-types must be a comma-separated list of corruption names"
+                )
+            bad = [c for c in corruption_types if c not in CORRUPTION_FUNCS]
+            if bad:
+                parser.error(
+                    "unknown --corruption-types entries: {}; choose from: {}".format(
+                        ", ".join(bad),
+                        ", ".join(sorted(CORRUPTION_FUNCS.keys())),
+                    )
+                )
+        elif args.corruption_type not in CORRUPTION_FUNCS:
+            parser.error(
+                "unknown --corruption-type; choose one of: {}".format(
+                    ", ".join(sorted(CORRUPTION_FUNCS.keys()))
+                )
+            )
 
     seed_everything(args.seed)
 
@@ -338,6 +366,7 @@ def main() -> None:
             split="test",
             corrupt_fraction=args.corrupt_fraction,
             corruption_type=args.corruption_type,
+            corruption_types=corruption_types,
             train_ratio=0.8,
             val_ratio=0.1,
             test_ratio=0.1,
@@ -469,7 +498,9 @@ def main() -> None:
     summary["split"] = "test"
     if args.corrupt_fraction is not None:
         summary["corrupt_fraction"] = args.corrupt_fraction
-        summary["corruption_type"] = args.corruption_type
+        summary["corruption_type"] = (
+            ",".join(corruption_types) if corruption_types is not None else args.corruption_type
+        )
         summary["only_corrupted"] = bool(args.only_corrupted)
         summary["eval_sample_count"] = len(eligible)
     summary["ddim_steps"] = args.ddim_steps
@@ -477,24 +508,14 @@ def main() -> None:
     summary["strength"] = args.strength
     summary["keep_largest_component"] = keep_largest
 
-    print(json.dumps(summary, indent=2))
-
-    if args.output_json:
-        out_path = Path(args.output_json).resolve()
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump({"summary": summary, "per_sample": records}, f, indent=2)
-        print(f"Wrote {out_path}")
-
-    if args.output_csv:
-        csv_path = Path(args.output_csv).resolve()
-        write_records_csv(csv_path, records)
-        print(f"Wrote {csv_path}")
-
-    if args.output_summary_csv:
-        summary_csv = Path(args.output_summary_csv).resolve()
-        write_summary_csv(summary_csv, summary)
-        print(f"Wrote {summary_csv}")
+    out_dir = Path(args.output_dir).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    per_sample_path = out_dir / EVAL_PER_SAMPLE_CSV_NAME
+    summary_path = out_dir / EVAL_SUMMARY_CSV_NAME
+    write_records_csv(per_sample_path, records)
+    write_summary_csv(summary_path, summary)
+    print(f"Wrote {per_sample_path}")
+    print(f"Wrote {summary_path}")
 
 
 if __name__ == "__main__":
