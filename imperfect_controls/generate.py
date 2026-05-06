@@ -33,7 +33,10 @@ from cldm.ddim_hacked import DDIMSampler
 from cldm.model import create_model, load_state_dict
 from dataset import Fill50KDataset
 from generate_image import generate_image
-from imperfect_fill50k_dataset import DisjointCorruptFill50KDataset
+from imperfect_fill50k_dataset import (
+    CORRUPTION_FUNCS,
+    DisjointCorruptFill50KDataset,
+)
 
 
 def save_image(arr, path):
@@ -105,6 +108,17 @@ def main():
         help="Corruption name when --corrupt-fraction is set.",
     )
     parser.add_argument(
+        "--corruption-types",
+        type=str,
+        default=None,
+        metavar="LIST",
+        help=(
+            "Optional comma-separated list of corruption names (e.g. 'blur,noise'). "
+            "When set with --corrupt-fraction, corrupted indices are split as evenly "
+            "as possible across these types. If omitted, uses --corruption-type."
+        ),
+    )
+    parser.add_argument(
         "--only-corrupted",
         action="store_true",
         help=(
@@ -120,6 +134,21 @@ def main():
 
     if args.num_samples < 1:
         raise ValueError("--num-samples must be >= 1")
+
+    corruption_types = None
+    if args.corrupt_fraction is not None and args.corruption_types is not None:
+        raw = [s.strip() for s in args.corruption_types.split(",")]
+        corruption_types = [s for s in raw if s]
+        if len(corruption_types) == 0:
+            raise ValueError("--corruption-types must be a comma-separated list of corruption names")
+        bad = [c for c in corruption_types if c not in CORRUPTION_FUNCS]
+        if bad:
+            raise ValueError(
+                "unknown --corruption-types entries: {}; choose from: {}".format(
+                    ", ".join(bad),
+                    ", ".join(sorted(CORRUPTION_FUNCS.keys())),
+                )
+            )
 
     ckpt = Path(args.checkpoint).resolve()
     if not ckpt.is_file():
@@ -139,6 +168,7 @@ def main():
             split="test",
             corrupt_fraction=args.corrupt_fraction,
             corruption_type=args.corruption_type,
+            corruption_types=corruption_types,
             train_ratio=0.8,
             val_ratio=0.1,
             test_ratio=0.1,
@@ -178,7 +208,11 @@ def main():
         run_name = re.sub(r"[^\w.-]+", "_", ckpt.parent.name)[:64]
         if args.corrupt_fraction is not None:
             cf_tag = str(args.corrupt_fraction).replace(".", "p")
-            run_name = f"{run_name}_imperfect_{cf_tag}_{args.corruption_type}"[:120]
+            if corruption_types is not None:
+                ct_tag = "+".join(corruption_types)
+            else:
+                ct_tag = args.corruption_type
+            run_name = f"{run_name}_imperfect_{cf_tag}_{ct_tag}"[:120]
             if args.only_corrupted:
                 run_name = f"{run_name}_corrupted_only"[:120]
         out_dir = (_SCRIPT_DIR / "generated" / run_name).resolve()
