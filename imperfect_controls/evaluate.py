@@ -162,6 +162,9 @@ def write_summary_csv(path: Path, summary: Dict[str, Any]) -> None:
                 "mean": _csv_scalar(summary.get(f"{metric}_mean")),
                 "median": _csv_scalar(summary.get(f"{metric}_median")),
                 "std": _csv_scalar(summary.get(f"{metric}_std")),
+                "iqr": _csv_scalar(summary.get(f"{metric}_iqr")),
+                "trimmed_mean_5pct": _csv_scalar(summary.get(f"{metric}_trimmed_mean")),
+                "trimmed_std_5pct": _csv_scalar(summary.get(f"{metric}_trimmed_std")),
                 "value": "",
             }
         )
@@ -175,11 +178,24 @@ def write_summary_csv(path: Path, summary: Dict[str, Any]) -> None:
                     "mean": "",
                     "median": "",
                     "std": "",
+                    "iqr": "",
+                    "trimmed_mean_5pct": "",
+                    "trimmed_std_5pct": "",
                     "value": _csv_scalar(summary.get(key)),
                 }
             )
 
-    fieldnames = ["section", "metric", "mean", "median", "std", "value"]
+    fieldnames = [
+        "section",
+        "metric",
+        "mean",
+        "median",
+        "std",
+        "iqr",
+        "trimmed_mean_5pct",
+        "trimmed_std_5pct",
+        "value",
+    ]
 
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)

@@ -451,14 +451,40 @@ def iter_saved_samples(score_dir: Path) -> Iterator[Tuple[int, Path, Path]]:
             yield dataset_i, tp, gp
 
 
-def _nan_mean_median_std(arr: np.ndarray) -> tuple[float | None, float | None, float | None]:
-    if arr.size == 0 or not np.any(np.isfinite(arr)):
-        return None, None, None
-    return (
-        float(np.nanmean(arr)),
-        float(np.nanmedian(arr)),
-        float(np.nanstd(arr, ddof=0)),
-    )
+def _metric_stats(arr: np.ndarray) -> Dict[str, float | None]:
+    """Return mean/median/std/iqr and 5% trimmed mean/std, ignoring non-finite values."""
+    finite = np.asarray(arr, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return {
+            "mean": None,
+            "median": None,
+            "std": None,
+            "iqr": None,
+            "trimmed_mean": None,
+            "trimmed_std": None,
+        }
+
+    q25, q75 = np.percentile(finite, [25.0, 75.0])
+    sorted_vals = np.sort(finite)
+    trim_count = int(np.floor(0.05 * sorted_vals.size))
+    if trim_count > 0:
+        trimmed = sorted_vals[trim_count:-trim_count]
+    else:
+        trimmed = sorted_vals
+
+    # If trimming removes everything, return None for trimmed stats only.
+    trimmed_mean = float(trimmed.mean()) if trimmed.size > 0 else None
+    trimmed_std = float(trimmed.std(ddof=0)) if trimmed.size > 0 else None
+
+    return {
+        "mean": float(finite.mean()),
+        "median": float(np.median(finite)),
+        "std": float(finite.std(ddof=0)),
+        "iqr": float(q75 - q25),
+        "trimmed_mean": trimmed_mean,
+        "trimmed_std": trimmed_std,
+    }
 
 
 def summarize_metrics(
@@ -471,79 +497,40 @@ def summarize_metrics(
     background_color_errors: List[float],
     total_color_errors: List[float],
 ) -> Dict[str, Any]:
+    metric_names = [
+        "mask_iou",
+        "roundness_abs_delta",
+        "roundness_pred",
+        "radius_error",
+        "center_error",
+        "circle_color_error",
+        "background_color_error",
+        "total_color_error",
+    ]
     if not ious:
-        return {
-            "count": 0,
-            "mask_iou_mean": None,
-            "mask_iou_median": None,
-            "mask_iou_std": None,
-            "roundness_abs_delta_mean": None,
-            "roundness_abs_delta_median": None,
-            "roundness_abs_delta_std": None,
-            "roundness_pred_mean": None,
-            "roundness_pred_median": None,
-            "roundness_pred_std": None,
-            "radius_error_mean": None,
-            "radius_error_median": None,
-            "radius_error_std": None,
-            "center_error_mean": None,
-            "center_error_median": None,
-            "center_error_std": None,
-            "circle_color_error_mean": None,
-            "circle_color_error_median": None,
-            "circle_color_error_std": None,
-            "background_color_error_mean": None,
-            "background_color_error_median": None,
-            "background_color_error_std": None,
-            "total_color_error_mean": None,
-            "total_color_error_median": None,
-            "total_color_error_std": None,
-        }
-    arr = np.asarray(ious, dtype=np.float64)
-    r_arr = np.asarray(roundness_deltas, dtype=np.float64) if roundness_deltas else np.asarray([], dtype=np.float64)
-    rp_arr = np.asarray(roundness_preds, dtype=np.float64) if roundness_preds else np.asarray([], dtype=np.float64)
-    rad_arr = np.asarray(radius_errors, dtype=np.float64) if radius_errors else np.asarray([], dtype=np.float64)
-    ctr_arr = np.asarray(center_errors, dtype=np.float64) if center_errors else np.asarray([], dtype=np.float64)
-    circ_col_arr = (
-        np.asarray(circle_color_errors, dtype=np.float64) if circle_color_errors else np.asarray([], dtype=np.float64)
-    )
-    bg_col_arr = (
-        np.asarray(background_color_errors, dtype=np.float64)
-        if background_color_errors
-        else np.asarray([], dtype=np.float64)
-    )
-    total_col_arr = (
-        np.asarray(total_color_errors, dtype=np.float64) if total_color_errors else np.asarray([], dtype=np.float64)
-    )
-    r_mean, r_med, r_std = _nan_mean_median_std(rad_arr)
-    c_mean, c_med, c_std = _nan_mean_median_std(ctr_arr)
-    return {
-        "count": len(ious),
-        "mask_iou_mean": float(arr.mean()),
-        "mask_iou_median": float(np.median(arr)),
-        "mask_iou_std": float(arr.std(ddof=0)),
-        "roundness_abs_delta_mean": float(r_arr.mean()) if r_arr.size > 0 else None,
-        "roundness_abs_delta_median": float(np.median(r_arr)) if r_arr.size > 0 else None,
-        "roundness_abs_delta_std": float(r_arr.std(ddof=0)) if r_arr.size > 0 else None,
-        "roundness_pred_mean": float(rp_arr.mean()) if rp_arr.size > 0 else None,
-        "roundness_pred_median": float(np.median(rp_arr)) if rp_arr.size > 0 else None,
-        "roundness_pred_std": float(rp_arr.std(ddof=0)) if rp_arr.size > 0 else None,
-        "radius_error_mean": r_mean,
-        "radius_error_median": r_med,
-        "radius_error_std": r_std,
-        "center_error_mean": c_mean,
-        "center_error_median": c_med,
-        "center_error_std": c_std,
-        "circle_color_error_mean": float(circ_col_arr.mean()) if circ_col_arr.size > 0 else None,
-        "circle_color_error_median": float(np.median(circ_col_arr)) if circ_col_arr.size > 0 else None,
-        "circle_color_error_std": float(circ_col_arr.std(ddof=0)) if circ_col_arr.size > 0 else None,
-        "background_color_error_mean": float(bg_col_arr.mean()) if bg_col_arr.size > 0 else None,
-        "background_color_error_median": float(np.median(bg_col_arr)) if bg_col_arr.size > 0 else None,
-        "background_color_error_std": float(bg_col_arr.std(ddof=0)) if bg_col_arr.size > 0 else None,
-        "total_color_error_mean": float(total_col_arr.mean()) if total_col_arr.size > 0 else None,
-        "total_color_error_median": float(np.median(total_col_arr)) if total_col_arr.size > 0 else None,
-        "total_color_error_std": float(total_col_arr.std(ddof=0)) if total_col_arr.size > 0 else None,
+        out: Dict[str, Any] = {"count": 0}
+        for metric_name in metric_names:
+            for stat_name in ("mean", "median", "std", "iqr", "trimmed_mean", "trimmed_std"):
+                out[f"{metric_name}_{stat_name}"] = None
+        return out
+
+    metric_arrays = {
+        "mask_iou": np.asarray(ious, dtype=np.float64),
+        "roundness_abs_delta": np.asarray(roundness_deltas, dtype=np.float64),
+        "roundness_pred": np.asarray(roundness_preds, dtype=np.float64),
+        "radius_error": np.asarray(radius_errors, dtype=np.float64),
+        "center_error": np.asarray(center_errors, dtype=np.float64),
+        "circle_color_error": np.asarray(circle_color_errors, dtype=np.float64),
+        "background_color_error": np.asarray(background_color_errors, dtype=np.float64),
+        "total_color_error": np.asarray(total_color_errors, dtype=np.float64),
     }
+
+    out = {"count": len(ious)}
+    for metric_name, metric_arr in metric_arrays.items():
+        stats = _metric_stats(metric_arr)
+        for stat_name, value in stats.items():
+            out[f"{metric_name}_{stat_name}"] = value
+    return out
 
 
 def color_errors_from_mask(
