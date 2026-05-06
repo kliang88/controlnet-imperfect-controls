@@ -51,7 +51,7 @@ _parser.add_argument(
     default=None,
     metavar="N",
     help=(
-        "Global samples per optimizer step (default 16). Must be divisible by "
+        "Global samples per optimizer step (default: --batch-size * --num-gpus, i.e. no grad accumulation). Must be divisible by "
         "(--batch-size * --num-gpus); sets Trainer accumulate_grad_batches."
     ),
 )
@@ -204,7 +204,6 @@ def main():
     checkpoint_dir = str(_checkpoint_base / _RUN_SUBDIR) if _RUN_SUBDIR else str(_checkpoint_base)
     Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
     print("Checkpoints directory: {}".format(checkpoint_dir))
-    effective_batch_size = 16
     batch_size = 4  # per-GPU micro-batch; accumulation targets effective_batch_size
     logger_freq = 300
     val_every_n_steps = 500
@@ -223,6 +222,9 @@ def main():
         if _cli.effective_batch_size < 1:
             sys.exit("--effective-batch-size must be >= 1")
         effective_batch_size = _cli.effective_batch_size
+    else:
+        # Default to no gradient accumulation unless explicitly requested.
+        effective_batch_size = batch_size * num_gpus
     if _cli.learning_rate is not None:
         if _cli.learning_rate <= 0:
             sys.exit("--learning-rate must be > 0")
