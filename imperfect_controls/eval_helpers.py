@@ -452,7 +452,7 @@ def iter_saved_samples(score_dir: Path) -> Iterator[Tuple[int, Path, Path]]:
 
 
 def _metric_stats(arr: np.ndarray) -> Dict[str, float | None]:
-    """Return mean/median/std/iqr and 5% trimmed mean/std, ignoring non-finite values."""
+    """Return aggregate stats, ignoring non-finite values."""
     finite = np.asarray(arr, dtype=np.float64)
     finite = finite[np.isfinite(finite)]
     if finite.size == 0:
@@ -460,6 +460,8 @@ def _metric_stats(arr: np.ndarray) -> Dict[str, float | None]:
             "mean": None,
             "median": None,
             "std": None,
+            "q1": None,
+            "q3": None,
             "iqr": None,
             "trimmed_mean": None,
             "trimmed_std": None,
@@ -481,6 +483,8 @@ def _metric_stats(arr: np.ndarray) -> Dict[str, float | None]:
         "mean": float(finite.mean()),
         "median": float(np.median(finite)),
         "std": float(finite.std(ddof=0)),
+        "q1": float(q25),
+        "q3": float(q75),
         "iqr": float(q75 - q25),
         "trimmed_mean": trimmed_mean,
         "trimmed_std": trimmed_std,
@@ -510,7 +514,16 @@ def summarize_metrics(
     if not ious:
         out: Dict[str, Any] = {"count": 0}
         for metric_name in metric_names:
-            for stat_name in ("mean", "median", "std", "iqr", "trimmed_mean", "trimmed_std"):
+            for stat_name in (
+                "mean",
+                "median",
+                "std",
+                "q1",
+                "q3",
+                "iqr",
+                "trimmed_mean",
+                "trimmed_std",
+            ):
                 out[f"{metric_name}_{stat_name}"] = None
         return out
 
