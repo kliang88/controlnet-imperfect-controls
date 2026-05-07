@@ -152,3 +152,4 @@ imperfect_controls/eval_results/
 imperfect_controls/debug_masks/
 *.slurm
 imperfect_controls/eval_tables/
+imperfect_controls/eval_plots/
