@@ -153,3 +153,4 @@ imperfect_controls/debug_masks/
 *.slurm
 imperfect_controls/eval_tables/
 imperfect_controls/eval_plots/
+imperfect_controls/generated_grids/
