@@ -46,10 +46,8 @@ echo "Using checkpoint: ${CKPT}"
 
 python imperfect_controls/generate.py \
   --checkpoint "${CKPT}" \
-  --corrupt-fraction 0.5 \
   --corruption-type edge_segment_remove \
-  --only-corrupted \
-  --num-samples 50 \
+  --num-samples 10 \
   --output-dir imperfect_controls/generated/imperfect50_edge_drop_slurm
 
 echo "[$(date)] Generate job complete."

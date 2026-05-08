@@ -13,12 +13,28 @@ import json
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
-import cv2
+try:
+    import cv2  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover
+    cv2 = None  # type: ignore
 import numpy as np
-from torch.utils.data import Dataset
+try:
+    from torch.utils.data import Dataset  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover
+    class Dataset:  # type: ignore
+        pass
 
 # hint: float32 HWC RGB in [0, 1]
 CorruptionFn = Callable[[np.ndarray, np.random.Generator], np.ndarray]
+
+
+def _require_cv2() -> None:
+    if cv2 is None:
+        raise ModuleNotFoundError(
+            "OpenCV (cv2) is required for this corruption/dataset path. "
+            "Install it (e.g. `pip install opencv-python`) or choose a corruption "
+            "that doesn't require cv2 (e.g. border_brighten)."
+        )
 
 
 def _hint_stroke_mask(hint: np.ndarray) -> np.ndarray:
@@ -28,6 +44,7 @@ def _hint_stroke_mask(hint: np.ndarray) -> np.ndarray:
     blurred background. We also keep high-luminance pixels (near-white lines).
     """
     h, w = hint.shape[:2]
+    _require_cv2()
     gray = hint.mean(axis=2).astype(np.float32)
     g8 = np.clip(gray * 255.0, 0.0, 255.0).astype(np.uint8)
     k = int(max(15, min(h, w) // 10) | 1)  # odd kernel ~10% of side
@@ -156,6 +173,7 @@ def apply_hint_patchy_strong_noise(
     """
     out = np.clip(hint, 0.0, 1.0).astype(np.float32, copy=True)
     h, w = out.shape[:2]
+    _require_cv2()
 
     if sigma_background > 0:
         bg = rng.normal(0.0, sigma_background, out.shape).astype(np.float32)
@@ -235,6 +253,7 @@ def apply_hint_edge_speckle_noise(
     base = np.clip(hint, 0.0, 1.0).astype(np.float32, copy=True)
     out = base.copy()
     h, w = out.shape[:2]
+    _require_cv2()
     edge = _hint_stroke_mask(base)
     if not np.any(edge):
         return out
@@ -349,6 +368,7 @@ def apply_hint_gaussian_blur(
     halo_strength: float = 0.9,
     halo_gamma: float = 2.2,
 ) -> np.ndarray:
+    _require_cv2()
     # Make blur deterministic and always pick the strongest setting.
     # (We keep the `rng` argument for API compatibility with other corruptions.)
     k = int(max(k_choices))
@@ -404,6 +424,7 @@ def apply_hint_downsample(
     control looks like a coarse pixel grid (typical ``factor`` 8).
     """
     _ = rng  # deterministic; keeps CorruptionFn signature
+    _require_cv2()
     x = np.clip(hint, 0.0, 1.0).astype(np.float32, copy=True)
     h, w = x.shape[:2]
     f = int(max(2, factor))
@@ -414,6 +435,169 @@ def apply_hint_downsample(
     return np.clip(out.astype(np.float32), 0.0, 1.0)
 
 
+def apply_hint_border_brighten(
+    hint: np.ndarray,
+    rng: np.random.Generator,
+    *,
+    band_frac: float = 0.22,
+    max_alpha: float = 0.92,
+    gamma: float = 1.6,
+    keep_center_alpha: float = 0.0,
+    noise_sigma: float = 0.01,
+) -> np.ndarray:
+    """Brighten a strong band near the image border, fading inward.
+
+    This simulates overexposure / lighting falloff around the frame edges.
+    We blend toward white near the boundary while preserving a faint trace of
+    the original stroke so the edge is barely visible.
+    """
+    base = np.clip(hint, 0.0, 1.0).astype(np.float32, copy=True)
+    h, w = base.shape[:2]
+    if h < 2 or w < 2:
+        return base
+
+    bf = float(np.clip(band_frac, 0.01, 0.49))
+    band_px = max(1.0, bf * float(min(h, w)))
+
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    d = np.minimum.reduce([yy, xx, (h - 1) - yy, (w - 1) - xx])
+    # strength=1 at border, 0 at/after band_px; smooth via cosine.
+    t = np.clip(1.0 - (d / band_px), 0.0, 1.0)
+    t = 0.5 - 0.5 * np.cos(np.pi * t)
+    alpha = np.power(t, float(max(0.05, gamma))) * float(np.clip(max_alpha, 0.0, 1.0))
+
+    if keep_center_alpha > 0:
+        alpha = np.maximum(alpha, float(np.clip(keep_center_alpha, 0.0, 1.0)) * (1.0 - t))
+
+    out = base * (1.0 - alpha[:, :, None]) + 1.0 * (alpha[:, :, None])
+
+    if noise_sigma and float(noise_sigma) > 0:
+        g = rng.normal(0.0, float(noise_sigma), size=out.shape).astype(np.float32)
+        out = np.clip(out + g * (alpha[:, :, None] ** 0.5), 0.0, 1.0)
+
+    return np.clip(out, 0.0, 1.0)
+
+
+def apply_hint_edge_halo_brighten(
+    hint: np.ndarray,
+    rng: np.random.Generator,
+    *,
+    # Approx thickness of the bright halo band around the stroke.
+    halo_radius_frac: float = 0.14,
+    # Blend-to-white strength at the halo peak.
+    max_alpha: float = 0.99,
+    # Nonlinear shaping: >1 narrows peak, <1 widens.
+    gamma: float = 0.9,
+    # Suppress the stroke core so we brighten mostly *around* it.
+    core_suppress: float = 0.88,
+    # Small noise to look like exposure / sensor bloom.
+    noise_sigma: float = 0.015,
+    # Stroke detection thresholds (robust across Fill50k line colors).
+    local_contrast_thresh: float = 0.055,
+    white_floor: float = 0.72,
+) -> np.ndarray:
+    """Add a strong brightness halo around the (circle) stroke edge.
+
+    Unlike `border_brighten`, this brightens *around the control edge itself*.
+    It aims for "pretty strong but can still see the edge barely": the halo is
+    strong and reduces contrast, but leaves a faint trace of the stroke.
+    """
+    base = np.clip(hint, 0.0, 1.0).astype(np.float32, copy=True)
+    h, w = base.shape[:2]
+    if h < 2 or w < 2:
+        return base
+
+    short = float(min(h, w))
+    halo_px = int(max(2, round(float(halo_radius_frac) * short)))
+
+    gray = base.mean(axis=2).astype(np.float32)
+
+    # --- Stroke mask (prefer cv2 local-contrast if available; else use Pillow blur) ---
+    edge = None
+    if cv2 is not None:
+        g8 = np.clip(gray * 255.0, 0.0, 255.0).astype(np.uint8)
+        k = int(max(15, min(h, w) // 10) | 1)
+        bg = cv2.GaussianBlur(g8, (k, k), 0).astype(np.float32) / 255.0
+        local_lift = gray - bg
+        by_contrast = local_lift > float(local_contrast_thresh)
+        lum_hi = np.percentile(gray, 99.0)
+        floor_white = max(float(white_floor), float(lum_hi) * 0.92)
+        by_white = gray >= floor_white
+        edge = by_contrast | by_white
+    else:
+        # Pillow-only path (works in minimal envs used for quick previews).
+        from PIL import Image, ImageFilter
+
+        g8 = (np.clip(gray, 0.0, 1.0) * 255.0).astype(np.uint8)
+        gimg = Image.fromarray(g8, mode="L")
+        # Large blur approximates background plate; subtracting gives local contrast.
+        blur_r = max(3, int(round(0.10 * short)))
+        bg = np.asarray(gimg.filter(ImageFilter.GaussianBlur(radius=blur_r))).astype(
+            np.float32
+        ) / 255.0
+        local_lift = gray - bg
+        by_contrast = local_lift > float(local_contrast_thresh)
+        lum_hi = np.percentile(gray, 99.0)
+        floor_white = max(float(white_floor), float(lum_hi) * 0.92)
+        by_white = gray >= floor_white
+        edge = by_contrast | by_white
+
+    if edge is None or not np.any(edge):
+        # Fallback: brightest few percent.
+        t = float(np.percentile(gray, 94.0))
+        edge = gray >= max(t, 0.35)
+        if not np.any(edge):
+            return base
+
+    # --- Make a soft halo around the stroke mask ---
+    # We synthesize the control from the (dilated) stroke mask only. Since we
+    # aren't preserving the original stroke pixels, we can let the halo peak at
+    # the edge location without creating a crisp outline.
+    if cv2 is not None:
+        m = edge.astype(np.uint8) * 255
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        it = max(1, int(round(float(halo_px))))
+        dil = cv2.dilate(m, k, iterations=it) > 0
+        halo_u8 = dil.astype(np.uint8) * 255
+        sigma = max(1.0, float(halo_px) / 2.0)
+        halo = cv2.GaussianBlur(
+            halo_u8.astype(np.float32) / 255.0,
+            (0, 0),
+            sigmaX=sigma,
+            sigmaY=sigma,
+            borderType=cv2.BORDER_CONSTANT,
+        ).astype(np.float32)
+        core = 0.0
+    else:
+        from PIL import Image, ImageFilter
+
+        m = edge.astype(np.uint8) * 255
+        mimg = Image.fromarray(m, mode="L")
+        # Dilation via MaxFilter, then blur.
+        size = max(3, 2 * int(round(float(halo_px))) + 1)
+        dil = mimg.filter(ImageFilter.MaxFilter(size=size))
+        halo = np.asarray(
+            dil.filter(ImageFilter.GaussianBlur(radius=max(1.0, float(halo_px) / 2.0)))
+        ).astype(np.float32) / 255.0
+        core = 0.0
+
+    # Extra core suppression (usually small now since ring excludes edge).
+    halo = np.clip(halo - float(core_suppress) * core, 0.0, 1.0)
+    halo = np.power(halo, float(max(0.05, gamma)))
+
+    max_a = float(np.clip(max_alpha, 0.0, 1.0))
+    alpha = np.clip(halo * max_a, 0.0, 1.0)
+    # Synthesize control from halo only: render a bright ring on black.
+    # This avoids any residual stroke/core edge artifacts entirely.
+    out = np.repeat(alpha[:, :, None], 3, axis=2).astype(np.float32)
+
+    if noise_sigma and float(noise_sigma) > 0:
+        g = rng.normal(0.0, float(noise_sigma), size=out.shape).astype(np.float32)
+        out = np.clip(out + g * (alpha[:, :, None] ** 0.5), 0.0, 1.0)
+
+    return np.clip(out, 0.0, 1.0)
+
+
 CORRUPTION_FUNCS: Dict[str, CorruptionFn] = {
     "edge_segment_remove": apply_edge_segment_remove,
     "noise": apply_hint_gaussian_noise,
@@ -421,6 +605,8 @@ CORRUPTION_FUNCS: Dict[str, CorruptionFn] = {
     "noise_edge_speckle": apply_hint_edge_speckle_noise,
     "blur": apply_hint_gaussian_blur,
     "downsample": apply_hint_downsample,
+    "border_brighten": apply_hint_border_brighten,
+    "edge_halo_brighten": apply_hint_edge_halo_brighten,
 }
 
 
@@ -529,6 +715,7 @@ class DisjointCorruptFill50KDataset(Dataset):
         target_filename = item["target"]
         prompt = item["prompt"]
 
+        _require_cv2()
         source = cv2.imread(str(self.dataset_root / source_filename))
         target = cv2.imread(str(self.dataset_root / target_filename))
 
