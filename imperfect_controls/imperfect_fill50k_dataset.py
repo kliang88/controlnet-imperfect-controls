@@ -434,56 +434,12 @@ def apply_hint_downsample(
     out = cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
     return np.clip(out.astype(np.float32), 0.0, 1.0)
 
-
-def apply_hint_border_brighten(
-    hint: np.ndarray,
-    rng: np.random.Generator,
-    *,
-    band_frac: float = 0.22,
-    max_alpha: float = 0.92,
-    gamma: float = 1.6,
-    keep_center_alpha: float = 0.0,
-    noise_sigma: float = 0.01,
-) -> np.ndarray:
-    """Brighten a strong band near the image border, fading inward.
-
-    This simulates overexposure / lighting falloff around the frame edges.
-    We blend toward white near the boundary while preserving a faint trace of
-    the original stroke so the edge is barely visible.
-    """
-    base = np.clip(hint, 0.0, 1.0).astype(np.float32, copy=True)
-    h, w = base.shape[:2]
-    if h < 2 or w < 2:
-        return base
-
-    bf = float(np.clip(band_frac, 0.01, 0.49))
-    band_px = max(1.0, bf * float(min(h, w)))
-
-    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
-    d = np.minimum.reduce([yy, xx, (h - 1) - yy, (w - 1) - xx])
-    # strength=1 at border, 0 at/after band_px; smooth via cosine.
-    t = np.clip(1.0 - (d / band_px), 0.0, 1.0)
-    t = 0.5 - 0.5 * np.cos(np.pi * t)
-    alpha = np.power(t, float(max(0.05, gamma))) * float(np.clip(max_alpha, 0.0, 1.0))
-
-    if keep_center_alpha > 0:
-        alpha = np.maximum(alpha, float(np.clip(keep_center_alpha, 0.0, 1.0)) * (1.0 - t))
-
-    out = base * (1.0 - alpha[:, :, None]) + 1.0 * (alpha[:, :, None])
-
-    if noise_sigma and float(noise_sigma) > 0:
-        g = rng.normal(0.0, float(noise_sigma), size=out.shape).astype(np.float32)
-        out = np.clip(out + g * (alpha[:, :, None] ** 0.5), 0.0, 1.0)
-
-    return np.clip(out, 0.0, 1.0)
-
-
 def apply_hint_edge_halo_brighten(
     hint: np.ndarray,
     rng: np.random.Generator,
     *,
     # Approx thickness of the bright halo band around the stroke.
-    halo_radius_frac: float = 0.14,
+    halo_radius_frac: float = 0.04,
     # Blend-to-white strength at the halo peak.
     max_alpha: float = 0.99,
     # Nonlinear shaping: >1 narrows peak, <1 widens.
@@ -605,7 +561,6 @@ CORRUPTION_FUNCS: Dict[str, CorruptionFn] = {
     "noise_edge_speckle": apply_hint_edge_speckle_noise,
     "blur": apply_hint_gaussian_blur,
     "downsample": apply_hint_downsample,
-    "border_brighten": apply_hint_border_brighten,
     "edge_halo_brighten": apply_hint_edge_halo_brighten,
 }
 
